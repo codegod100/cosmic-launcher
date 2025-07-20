@@ -953,17 +953,10 @@ impl cosmic::Application for CosmicLauncher {
                     })
                     .collect();
 
-                let preview_grid = components::preview_grid::preview_grid(previews)
-                    .selected_index(self.focused)
-                    .columns(3)
-                    .thumbnail_size(256.0, 144.0)
-                    .spacing(16.0)
-                    .on_select(|index| components::preview_grid::PreviewMessage::WindowSelected(index))
-                    .on_activate(|index| components::preview_grid::PreviewMessage::WindowActivated(index));
+                let grid_content = components::preview_grid::create_preview_grid(previews, self.focused)
+                    .map(Message::PreviewAction);
 
-                let window = container(
-                    preview_grid.build_grid().map(Message::PreviewAction)
-                )
+                let window = container(grid_content)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .center_x(Length::Shrink)

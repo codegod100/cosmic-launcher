@@ -41,11 +41,12 @@ impl ScreenshotManager {
         let windows = Window::all().map_err(|e| format!("Failed to get windows: {}", e))?;
         
         for window in windows {
-            if window.is_minimized().unwrap_or(true) {
+            // Skip minimized windows
+            if window.is_minimized() {
                 continue;
             }
             
-            let window_title = window.title().unwrap_or_else(|_| String::new());
+            let window_title = window.title().to_string();
             if window_title.contains(title) || title.contains(&window_title) {
                 return self.capture_window(&window);
             }
@@ -59,15 +60,16 @@ impl ScreenshotManager {
         let mut screenshots = Vec::new();
         
         for window in windows {
-            if window.is_minimized().unwrap_or(true) {
+            // Skip minimized windows
+            if window.is_minimized() {
                 continue;
             }
             
             match self.capture_window(&window) {
                 Ok(screenshot) => screenshots.push(screenshot),
                 Err(e) => {
-                    tracing::warn!("Failed to capture window '{}': {}", 
-                        window.title().unwrap_or_else(|_| String::new()), e);
+                    let title = window.title().to_string();
+                    tracing::warn!("Failed to capture window '{}': {}", title, e);
                 }
             }
         }
@@ -77,7 +79,7 @@ impl ScreenshotManager {
 
     fn capture_window(&self, window: &Window) -> Result<WindowScreenshot, Box<dyn std::error::Error>> {
         let image = window.capture_image()?;
-        let title = window.title().unwrap_or_else(|_| String::new());
+        let title = window.title().to_string();
         
         let mut image_data = Vec::new();
         image.write_to(&mut std::io::Cursor::new(&mut image_data), image::ImageFormat::Png)?;
