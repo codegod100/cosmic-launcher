@@ -11,6 +11,7 @@ pub struct WindowScreenshot {
     pub timestamp: std::time::Instant,
 }
 
+#[derive(Clone)]
 pub struct ScreenshotManager {
     cache: HashMap<String, WindowScreenshot>,
     max_cache_size: usize,
@@ -37,14 +38,14 @@ impl ScreenshotManager {
     }
 
     pub fn capture_window_by_title(&mut self, title: &str) -> Result<WindowScreenshot, Box<dyn std::error::Error>> {
-        let windows = Window::all()?;
+        let windows = Window::all().map_err(|e| format!("Failed to get windows: {}", e))?;
         
         for window in windows {
-            if window.is_minimized()? {
+            if window.is_minimized().unwrap_or(true) {
                 continue;
             }
             
-            let window_title = window.title()?;
+            let window_title = window.title().unwrap_or_else(|_| String::new());
             if window_title.contains(title) || title.contains(&window_title) {
                 return self.capture_window(&window);
             }
@@ -54,11 +55,11 @@ impl ScreenshotManager {
     }
 
     pub fn capture_all_windows(&mut self) -> Result<Vec<WindowScreenshot>, Box<dyn std::error::Error>> {
-        let windows = Window::all()?;
+        let windows = Window::all().map_err(|e| format!("Failed to get windows: {}", e))?;
         let mut screenshots = Vec::new();
         
         for window in windows {
-            if window.is_minimized()? {
+            if window.is_minimized().unwrap_or(true) {
                 continue;
             }
             
@@ -66,7 +67,7 @@ impl ScreenshotManager {
                 Ok(screenshot) => screenshots.push(screenshot),
                 Err(e) => {
                     tracing::warn!("Failed to capture window '{}': {}", 
-                        window.title().unwrap_or_default(), e);
+                        window.title().unwrap_or_else(|_| String::new()), e);
                 }
             }
         }
@@ -76,10 +77,10 @@ impl ScreenshotManager {
 
     fn capture_window(&self, window: &Window) -> Result<WindowScreenshot, Box<dyn std::error::Error>> {
         let image = window.capture_image()?;
-        let title = window.title()?;
+        let title = window.title().unwrap_or_else(|_| String::new());
         
         let mut image_data = Vec::new();
-        image.write_to(&mut std::io::Cursor::new(&mut image_data), image::ImageOutputFormat::Png)?;
+        image.write_to(&mut std::io::Cursor::new(&mut image_data), image::ImageFormat::Png)?;
         
         Ok(WindowScreenshot {
             window_id: title.clone(),
@@ -139,11 +140,11 @@ impl ScreenshotManager {
         self.cache.clear();
     }
 
-    pub fn update_screenshots_for_results(&mut self, results: &[SearchResult]) -> HashMap<String, WindowScreenshot> {
+    pub fn update_screenshots_for_results(&mut self, results: &[SearchResult]) -> HashMap<(u32, u32), WindowScreenshot> {
         let mut updated_screenshots = HashMap::new();
         
         for result in results {
-            if let Some(window_id) = &result.window {
+            if let Some(window_id) = result.window {
                 let title = if result.description.is_empty() { 
                     &result.name 
                 } else { 
@@ -152,7 +153,7 @@ impl ScreenshotManager {
                 
                 match self.get_or_capture_screenshot(title) {
                     Ok(screenshot) => {
-                        updated_screenshots.insert(window_id.clone(), screenshot);
+                        updated_screenshots.insert(window_id, screenshot);
                     }
                     Err(e) => {
                         tracing::debug!("Failed to capture screenshot for '{}': {}", title, e);

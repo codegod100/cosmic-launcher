@@ -160,7 +160,7 @@ pub struct CosmicLauncher {
     height: f32,
     needs_clear: bool,
     screenshot_manager: ScreenshotManager,
-    screenshot_handles: HashMap<String, cosmic::widget::image::Handle>,
+    screenshot_handles: HashMap<(u32, u32), cosmic::widget::image::Handle>,
 }
 
 #[derive(Debug, Clone)]
@@ -519,7 +519,7 @@ impl cosmic::Application for CosmicLauncher {
                         // Update screenshots for alt-tab mode
                         if self.alt_tab {
                             for item in &self.launcher_items {
-                                if let Some(window_id) = &item.window {
+                                if let Some(window_id) = item.window {
                                     let title = if item.description.is_empty() { 
                                         &item.name 
                                     } else { 
@@ -528,7 +528,7 @@ impl cosmic::Application for CosmicLauncher {
                                     
                                     if let Ok(screenshot) = self.screenshot_manager.get_or_capture_screenshot(title) {
                                         if let Ok(handle) = crate::screenshot::create_cosmic_image_handle(&screenshot) {
-                                            self.screenshot_handles.insert(window_id.clone(), handle);
+                                            self.screenshot_handles.insert(window_id, handle);
                                         }
                                     }
                                 }
@@ -943,8 +943,8 @@ impl cosmic::Application for CosmicLauncher {
                         let mut preview = components::preview_grid::WindowPreview::from_search_result(item, i == self.focused);
                         
                         // Add screenshot if available
-                        if let Some(window_id) = &item.window {
-                            if let Some(handle) = self.screenshot_handles.get(window_id) {
+                        if let Some(window_id) = item.window {
+                            if let Some(handle) = self.screenshot_handles.get(&window_id) {
                                 preview = preview.with_screenshot(handle.clone());
                             }
                         }
@@ -958,7 +958,6 @@ impl cosmic::Application for CosmicLauncher {
                     .columns(3)
                     .thumbnail_size(256.0, 144.0)
                     .spacing(16.0)
-                    .padding(16)
                     .on_select(|index| components::preview_grid::PreviewMessage::WindowSelected(index))
                     .on_activate(|index| components::preview_grid::PreviewMessage::WindowActivated(index));
 
@@ -967,8 +966,8 @@ impl cosmic::Application for CosmicLauncher {
                 )
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .center_x()
-                .center_y()
+                .center_x(Length::Shrink)
+                .center_y(Length::Shrink)
                 .class(Container::Custom(Box::new(|theme| container::Style {
                     text_color: Some(theme.cosmic().on_bg_color().into()),
                     icon_color: Some(theme.cosmic().on_bg_color().into()),
@@ -982,10 +981,7 @@ impl cosmic::Application for CosmicLauncher {
                 })))
                 .padding([24, 32]);
 
-                return autosize::autosize(window)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .id(AUTOSIZE_ID.clone())
+                return autosize::autosize(window, AUTOSIZE_ID.clone())
                     .into();
             }
 
