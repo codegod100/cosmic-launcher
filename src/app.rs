@@ -1,4 +1,4 @@
-use crate::{app::iced::event::listen_raw, components, fl, subscriptions::launcher};
+use crate::{app::iced::event::listen_raw, components, fl, screenshot::ScreenshotManager, subscriptions::launcher};
 use clap::Parser;
 use cosmic::app::{Core, CosmicFlags, Settings, Task};
 use cosmic::cctk::sctk;
@@ -159,6 +159,8 @@ pub struct CosmicLauncher {
     margin: f32,
     height: f32,
     needs_clear: bool,
+    screenshot_manager: ScreenshotManager,
+    screenshot_handles: HashMap<String, cosmic::widget::image::Handle>,
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +185,7 @@ pub enum Message {
     AltRelease,
     Overlap(OverlapNotifyEvent),
     Surface(surface::Action),
+    PreviewAction(components::preview_grid::PreviewMessage),
 }
 
 impl CosmicLauncher {
@@ -334,6 +337,8 @@ impl cosmic::Application for CosmicLauncher {
                 overlap: HashMap::new(),
                 height: 100.,
                 needs_clear: false,
+                screenshot_manager: ScreenshotManager::new(),
+                screenshot_handles: HashMap::new(),
             },
             Task::none(),
         )
@@ -510,6 +515,25 @@ impl cosmic::Application for CosmicLauncher {
                                     .collect::<Vec<_>>(),
                             );
                         }
+                        
+                        // Update screenshots for alt-tab mode
+                        if self.alt_tab {
+                            for item in &self.launcher_items {
+                                if let Some(window_id) = &item.window {
+                                    let title = if item.description.is_empty() { 
+                                        &item.name 
+                                    } else { 
+                                        &item.description 
+                                    };
+                                    
+                                    if let Ok(screenshot) = self.screenshot_manager.get_or_capture_screenshot(title) {
+                                        if let Ok(handle) = crate::screenshot::create_cosmic_image_handle(&screenshot) {
+                                            self.screenshot_handles.insert(window_id.clone(), handle);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         let mut cmds = Vec::new();
 
                         while let Some(element) = self.queue.pop_front() {
@@ -639,6 +663,18 @@ impl cosmic::Application for CosmicLauncher {
                 return cosmic::task::message(cosmic::Action::Cosmic(
                     cosmic::app::Action::Surface(a),
                 ));
+            }
+            Message::PreviewAction(preview_msg) => {
+                match preview_msg {
+                    components::preview_grid::PreviewMessage::WindowSelected(index) => {
+                        if index < self.launcher_items.len() {
+                            self.focused = index;
+                        }
+                    }
+                    components::preview_grid::PreviewMessage::WindowActivated(index) => {
+                        return self.update(Message::Activate(Some(index)));
+                    }
+                }
             }
         }
         Task::none()
@@ -898,19 +934,66 @@ impl cosmic::Application for CosmicLauncher {
                 })
                 .collect();
 
-            let mut content = if self.alt_tab {
-                Column::new()
-                    .max_width(600)
-                    .spacing(16)
-                    .width(Length::Shrink)
-                    .height(Length::Shrink)
-            } else {
-                column![launcher_entry]
-                    .max_width(600)
-                    .width(Length::Shrink)
-                    .height(Length::Shrink)
-                    .spacing(16)
-            };
+            if self.alt_tab {
+                // Create preview grid for alt-tab mode
+                let previews: Vec<_> = self.launcher_items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, item)| {
+                        let mut preview = components::preview_grid::WindowPreview::from_search_result(item, i == self.focused);
+                        
+                        // Add screenshot if available
+                        if let Some(window_id) = &item.window {
+                            if let Some(handle) = self.screenshot_handles.get(window_id) {
+                                preview = preview.with_screenshot(handle.clone());
+                            }
+                        }
+                        
+                        preview
+                    })
+                    .collect();
+
+                let preview_grid = components::preview_grid::preview_grid(previews)
+                    .selected_index(self.focused)
+                    .columns(3)
+                    .thumbnail_size(256.0, 144.0)
+                    .spacing(16.0)
+                    .padding(16)
+                    .on_select(|index| components::preview_grid::PreviewMessage::WindowSelected(index))
+                    .on_activate(|index| components::preview_grid::PreviewMessage::WindowActivated(index));
+
+                let window = container(
+                    preview_grid.build_grid().map(Message::PreviewAction)
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x()
+                .center_y()
+                .class(Container::Custom(Box::new(|theme| container::Style {
+                    text_color: Some(theme.cosmic().on_bg_color().into()),
+                    icon_color: Some(theme.cosmic().on_bg_color().into()),
+                    background: Some(Color::from(theme.cosmic().background.base).into()),
+                    border: Border {
+                        radius: theme.cosmic().corner_radii.radius_m.into(),
+                        width: 1.0,
+                        color: theme.cosmic().bg_divider().into(),
+                    },
+                    shadow: Shadow::default(),
+                })))
+                .padding([24, 32]);
+
+                return autosize::autosize(window)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .id(AUTOSIZE_ID.clone())
+                    .into();
+            }
+
+            let mut content = column![launcher_entry]
+                .max_width(600)
+                .width(Length::Shrink)
+                .height(Length::Shrink)
+                .spacing(16);
 
             if buttons.len() > SCROLL_MIN {
                 content = content.push(
