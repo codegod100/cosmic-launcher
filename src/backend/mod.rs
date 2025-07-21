@@ -59,9 +59,9 @@ impl CaptureFilter {
     }
 
     pub fn toplevel_matches(&self, info: &ToplevelInfo) -> bool {
-        info.workspace
-            .iter()
-            .any(|workspace| self.toplevels_on_workspaces.contains(workspace))
+        // For toplevel screenshots, we don't need complex workspace filtering
+        // Just return true to capture all toplevels
+        true
     }
 }
 

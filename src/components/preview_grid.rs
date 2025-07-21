@@ -45,10 +45,10 @@ pub fn create_preview_grid(
     let spacing = 8.0;
 
     let rows = (previews.len() + columns - 1) / columns;
-    let mut grid_rows: Vec<cosmic::Element<crate::app::Message>> = Vec::new();
+    let mut grid_rows: Vec<cosmic::Element<PreviewMessage>> = Vec::new();
 
     for row_idx in 0..rows {
-        let mut row_widgets = Vec::new();
+        let mut row_widgets: Vec<cosmic::Element<PreviewMessage>> = Vec::new();
 
         for col_idx in 0..columns {
             let index = row_idx * columns + col_idx;

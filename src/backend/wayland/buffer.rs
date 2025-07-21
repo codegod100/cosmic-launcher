@@ -26,14 +26,14 @@ pub struct Buffer {
 }
 
 impl AppData {
-    fn create_shm_buffer(&self, format: wl_shm::Format, (width, height): (u32, u32)) -> Buffer {
+    fn create_shm_buffer(&self, format: wl_shm::Format, (width, height): (u32, u32), qh: &QueueHandle<AppData>) -> Buffer {
         let fd = memfd_create("cosmic-launcher-shm", MemfdFlags::CLOEXEC).unwrap();
         rustix::fs::ftruncate(&fd, width as u64 * height as u64 * 4).unwrap();
 
         let pool = self.shm.wl_shm().create_pool(
             fd.as_fd(),
             width as i32 * height as i32 * 4,
-            &self.qh,
+            qh,
             (),
         );
 
@@ -43,7 +43,7 @@ impl AppData {
             height as i32,
             width as i32 * 4,
             format,
-            &self.qh,
+            qh,
             (),
         );
 
@@ -79,6 +79,7 @@ impl AppData {
         (width, height): (u32, u32),
         needs_linear: bool,
         drm_dev: Option<u64>,
+        qh: &QueueHandle<AppData>,
     ) -> anyhow::Result<Option<Buffer>> {
         let Some(feedback) = self.dmabuf_feedback.as_ref() else {
             return Ok(None);
@@ -119,7 +120,7 @@ impl AppData {
 
         let mut planes = Vec::new();
 
-        let params = self.dmabuf_state.create_params(&self.qh)?;
+        let params = self.dmabuf_state.as_mut().expect("DmabufState should be initialized").create_params(qh)?;
         let modifier = bo.modifier();
         let count = bo.plane_count()?;
         for i in 0..count as i32 {
@@ -146,7 +147,7 @@ impl AppData {
                 height as i32,
                 format,
                 zwp_linux_buffer_params_v1::Flags::empty(),
-                &self.qh,
+                qh,
             )
             .0;
 
@@ -166,7 +167,7 @@ impl AppData {
         }))
     }
 
-    pub fn create_buffer(&mut self, formats: &Formats) -> Buffer {
+    pub fn create_buffer(&mut self, formats: &Formats, qh: &QueueHandle<AppData>) -> Buffer {
         // XXX Handle other formats?
         let format = wl_shm::Format::Abgr8888;
 
@@ -182,6 +183,7 @@ impl AppData {
                 formats.buffer_size,
                 false,
                 formats.dmabuf_device.map(|dev| dev as u64),
+                qh,
             ) {
                 Ok(Some(buffer)) => {
                     return buffer;
@@ -194,7 +196,7 @@ impl AppData {
         // Fallback to shm buffer
         // Assume format is already known to be valid
         assert!(formats.shm_formats.contains(&format));
-        self.create_shm_buffer(format, formats.buffer_size)
+        self.create_shm_buffer(format, formats.buffer_size, qh)
     }
 }
 

@@ -1,6 +1,7 @@
 // Copyright 2023 System76 <info@system76.com>
 // SPDX-License-Identifier: GPL-3.0-only
 
+// Module imports
 pub mod buffer;
 pub mod capture;
 pub mod dmabuf;
@@ -77,11 +78,13 @@ pub struct AppData {
     buffers: Buffers,
     screenshot: Arc<Mutex<Option<SubsurfaceBuffer>>>,
     capture_sources: Vec<CaptureSource>,
+    gbm_devices: gbm_devices::GbmDevices,
+    thread_pool: futures::executor::ThreadPool,
 }
 
 impl AppData {
     fn new(globals: &GlobalListContents, qh: &QueueHandle<Self>) -> Self {
-        let (globals_list, _) = registry_queue_init(&Connection::connect_to_env().unwrap()).unwrap();
+        let (globals_list, _) = registry_queue_init::<Self>(&Connection::connect_to_env().unwrap()).unwrap();
         let registry_state = RegistryState::new(&globals_list);
         
         Self {
@@ -96,6 +99,8 @@ impl AppData {
             buffers: Vec::new(),
             screenshot: Arc::new(Mutex::new(None)),
             capture_sources: Vec::new(),
+            gbm_devices: gbm_devices::GbmDevices::default(),
+            thread_pool: futures::executor::ThreadPool::new().unwrap(),
             registry_state,
         }
     }
@@ -106,6 +111,10 @@ impl AppData {
 
     fn add_capture_source(&mut self, source: CaptureSource) {
         self.capture_sources.push(source);
+    }
+
+    fn remove_capture_source(&mut self, source: CaptureSource) {
+        self.capture_sources.retain(|s| s != &source);
     }
 }
 

@@ -16,7 +16,7 @@ use super::AppData;
 
 impl DmabufHandler for AppData {
     fn dmabuf_state(&mut self) -> &mut DmabufState {
-        &mut self.dmabuf_state
+        self.dmabuf_state.as_mut().expect("DmabufState should be initialized")
     }
     fn dmabuf_feedback(
         &mut self,

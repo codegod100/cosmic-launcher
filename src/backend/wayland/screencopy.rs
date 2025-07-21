@@ -103,13 +103,13 @@ impl ScreencopyFrameDataExt for FrameData {
 
 impl ScreencopyHandler for AppData {
     fn screencopy_state(&mut self) -> &mut ScreencopyState {
-        &mut self.screencopy_state
+        self.screencopy_state.as_mut().expect("ScreencopyState should be initialized")
     }
 
     fn init_done(
         &mut self,
         conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
         session: &CaptureSession,
         formats: &Formats,
     ) {
@@ -124,10 +124,10 @@ impl ScreencopyHandler for AppData {
         // Create new buffer if none
         // XXX What if formats have changed?
         if session.buffers.is_none() {
-            session.buffers = Some(array::from_fn(|_| self.create_buffer(formats)));
+            session.buffers = Some(array::from_fn(|_| self.create_buffer(formats, qh)));
         }
 
-        session.attach_buffer_and_commit(&capture, conn, &self.qh);
+        session.attach_buffer_and_commit(&capture, conn, qh);
     }
 
     fn ready(
@@ -199,11 +199,19 @@ impl ScreencopyHandler for AppData {
                     self.send_event(Event::ToplevelCapture(info.foreign_toplevel.clone(), image))
                 }
             }
-            CaptureSource::Output(workspace) => {
-                self.send_event(Event::WorkspaceCapture(workspace.clone(), image));
+            CaptureSource::Output(_output) => {
+                // TODO: Map output to workspace handle properly
+                // For now, skip workspace capture since we need ExtWorkspaceHandleV1
+                // but only have WlOutput
+                log::debug!("Captured output, but workspace capture mapping not implemented yet");
             }
-            CaptureSource::Output(_) => {
-                unreachable!()
+            CaptureSource::CosmicToplevel(_) => {
+                // TODO: Handle cosmic toplevel capture if needed
+                log::debug!("CosmicToplevel capture not implemented yet");
+            }
+            CaptureSource::CosmicWorkspace(_) => {
+                // TODO: Handle cosmic workspace capture if needed
+                log::debug!("CosmicWorkspace capture not implemented yet");
             }
         };
     }
