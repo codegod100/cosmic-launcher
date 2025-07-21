@@ -47,6 +47,7 @@ use cosmic::widget::{
 };
 use cosmic::{Element, keyboard_nav};
 use cosmic::{iced_runtime, surface};
+use cosmic::iced_winit::platform_specific::wayland::subsurface_widget::Subsurface;
 use iced::keyboard::Key;
 use iced::{Alignment, Color};
 use pop_launcher::{ContextOption, GpuPreference, IconSource, SearchResult};
@@ -292,6 +293,26 @@ impl CosmicLauncher {
             self.margin = o.y + o.height;
         }
     }
+
+    fn find_screenshot_for_item(&self, item: &SearchResult) -> Option<&CaptureImage> {
+        // If this launcher item represents a window, try to find matching screenshot
+        if item.window.is_some() {
+            // Try to match by window title/name with toplevels
+            for (handle, capture_image) in &self.toplevel_captures {
+                // Find corresponding toplevel info
+                if let Some(toplevel_info) = self.toplevels.iter().find(|t| t.foreign_toplevel == *handle) {
+                    // Match by title (item.description often contains the window title for windows)
+                    if item.description.contains(&toplevel_info.title) 
+                        || toplevel_info.title.contains(&item.description)
+                        || item.name.contains(&toplevel_info.title)
+                        || toplevel_info.title.contains(&item.name) {
+                        return Some(capture_image);
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 async fn launch(
@@ -400,13 +421,13 @@ impl cosmic::Application for CosmicLauncher {
                 ));
             }
             Message::TabPress if self.launcher_state == LauncherState::AltTab => {
-                // Cycle to next toplevel in Alt-Tab mode
-                if !self.toplevels.is_empty() {
+                // Cycle to next window in Alt-Tab mode
+                if !self.launcher_items.is_empty() {
                     let current = self.active.unwrap_or(0);
-                    let next = (current + 1) % self.toplevels.len();
+                    let next = (current + 1) % self.launcher_items.len();
                     self.active = Some(next);
-                    info!("Alt+Tab: cycling to toplevel {}: {:?}", next, 
-                          self.toplevels.get(next).map(|t| &t.title).unwrap_or(&"Unknown".to_string()));
+                    info!("Alt+Tab: cycling to window {}: {}", next, 
+                          self.launcher_items.get(next).map(|t| &t.name).unwrap_or(&"Unknown".to_string()));
                 }
             }
             Message::CompleteFocusedId(id) => {
@@ -558,9 +579,23 @@ impl cosmic::Application for CosmicLauncher {
                             );
                         }
 
-                        // Update screenshots for alt-tab mode
-                        if self.alt_tab {
-
+                        // Update screenshots for alt-tab mode and set active window
+                        if self.alt_tab && self.launcher_state == LauncherState::AltTab {
+                            // Set initial active window for alt-tab mode
+                            if self.active.is_none() && !self.launcher_items.is_empty() {
+                                // For ShiftAltTab, start from the last item
+                                if self.launcher_items.len() > 1 {
+                                    self.active = Some(self.launcher_items.len() - 1);
+                                } else {
+                                    self.active = Some(0);
+                                }
+                            }
+                            info!("Alt+Tab mode: {} windows available", self.launcher_items.len());
+                            if let Some(active_idx) = self.active {
+                                if let Some(item) = self.launcher_items.get(active_idx) {
+                                    info!("Currently selected window: {}", item.name);
+                                }
+                            }
                         }
                         let mut cmds = Vec::new();
 
@@ -686,8 +721,10 @@ impl cosmic::Application for CosmicLauncher {
                 Event::WorkspaceCapture(_, _) => {
                     // TODO: handle workspace capture
                 }
-                Event::ToplevelCapture(_, _) => {
-                    // TODO: handle toplevel capture
+                Event::ToplevelCapture(handle, capture_image) => {
+                    // Store screenshot for the toplevel
+                    info!("Storing screenshot for toplevel: {:?}", handle);
+                    self.toplevel_captures.insert(handle, capture_image);
                 }
                 Event::ToplevelCapabilities(_) => {
                     // TODO: handle toplevel capabilities
@@ -697,68 +734,66 @@ impl cosmic::Application for CosmicLauncher {
                 // Show the launcher in Alt-Tab mode
                 info!("Alt+Tab pressed - switching to task switcher mode");
                 
-                // Set to alt-tab mode
+                // Set to alt-tab mode and enable alt_tab flag
                 self.launcher_state = LauncherState::AltTab;
+                self.alt_tab = true;
+                
+                // Clear input and request window list through search
+                self.input_value.clear();
+                self.request(launcher::Request::Search(String::new()));
                 
                 // Show the surface if hidden
                 if self.surface_state == SurfaceState::Hidden {
                     self.surface_state = SurfaceState::WaitingToBeShown;
                 }
                 
-                // TODO: Select first available toplevel
-                if !self.toplevels.is_empty() {
-                    self.active = Some(0);
-                }
+                // Select first available toplevel will be handled in the Response::Update
+                self.active = Some(0);
             }
             Message::ShiftAltTab => {
                 // Show the launcher in Alt-Tab mode and go backwards
                 info!("Shift+Alt+Tab pressed - switching to task switcher mode (reverse)");
                 
-                // Set to alt-tab mode  
+                // Set to alt-tab mode and enable alt_tab flag
                 self.launcher_state = LauncherState::AltTab;
+                self.alt_tab = true;
+                
+                // Clear input and request window list through search
+                self.input_value.clear();
+                self.request(launcher::Request::Search(String::new()));
                 
                 // Show the surface if hidden
                 if self.surface_state == SurfaceState::Hidden {
                     self.surface_state = SurfaceState::WaitingToBeShown;
                 }
                 
-                // TODO: Select last available toplevel (reverse direction)
-                if !self.toplevels.is_empty() {
-                    self.active = Some(self.toplevels.len() - 1);
-                }
+                // Select last available toplevel (will be handled in Response::Update)
+                self.active = None; // Will be set to last item when list is populated
             }
             Message::AltRelease => {
-                // If we're in Alt-Tab mode, activate the selected toplevel and hide launcher
+                // If we're in Alt-Tab mode, activate the selected window and hide launcher
                 if self.launcher_state == LauncherState::AltTab {
-                    info!("Alt released - activating selected toplevel");
+                    info!("Alt released - activating selected window");
                     
                     if let Some(active_idx) = self.active {
-                        if let Some(toplevel_info) = self.toplevels.get(active_idx) {
-                            // TODO: Send activate command to the toplevel
-                            info!("Would activate toplevel: {:?}", toplevel_info.title);
+                        if let Some(item) = self.launcher_items.get(active_idx) {
+                            info!("Activating window: {}", item.name);
+                            // Use the existing activation system
+                            self.request(launcher::Request::Activate(item.id));
                         }
                     }
                     
                     // Reset state and hide launcher
                     self.launcher_state = LauncherState::Search;
-                    self.surface_state = SurfaceState::Hidden;
-                    self.active = None;
-                    
-                    return get_layer_surface(SctkLayerSurfaceSettings {
-                        id: window::Id::unique(),
-                        keyboard_interactivity: KeyboardInteractivity::None,
-                        anchor: Anchor::empty(),
-                        namespace: "launcher".to_string(),
-                        size: Some((None, None)),
-                        ..Default::default()
-                    });
+                    self.alt_tab = false;
+                    return self.hide();
                 }
             }
             Message::TabPress => {
                 // Handle Tab press during Alt+Tab mode to cycle through windows
-                if self.launcher_state == LauncherState::AltTab && !self.toplevels.is_empty() {
+                if self.launcher_state == LauncherState::AltTab && !self.launcher_items.is_empty() {
                     let current = self.active.unwrap_or(0);
-                    let next = (current + 1) % self.toplevels.len();
+                    let next = (current + 1) % self.launcher_items.len();
                     self.active = Some(next);
                     info!("Tab pressed - cycling to window {}", next);
                 }
@@ -963,30 +998,49 @@ impl CosmicLauncher {
                 .class(cosmic::theme::Text::Default)
         );
 
-        // List of toplevels (windows)
-        if self.toplevels.is_empty() {
+        // List of launcher items (windows) in alt-tab mode
+        if self.launcher_items.is_empty() {
             content = content.push(text("No windows open").size(16));
         } else {
             let mut windows_column = column![].spacing(5);
             
-            for (idx, toplevel) in self.toplevels.iter().enumerate() {
+            for (idx, item) in self.launcher_items.iter().enumerate() {
                 let is_selected = self.active == Some(idx);
+                
+                // Try to get screenshot for this item
+                let screenshot_widget: Element<Message> = if let Some(capture_image) = self.find_screenshot_for_item(item) {
+                    // Use the Subsurface widget with the wl_buffer
+                    Subsurface::new(capture_image.wl_buffer.clone())
+                        .width(Length::Fixed(120.0))
+                        .height(Length::Fixed(80.0))
+                        .into()
+                } else {
+                    // Fallback to text placeholder
+                    container(text("📄").size(48))
+                        .width(Length::Fixed(120.0))
+                        .height(Length::Fixed(80.0))
+                        .center_x(Length::Fill)
+                        .center_y(Length::Fill)
+                        .into()
+                };
+                
                 let window_item = container(
                     row![
-                        // Icon placeholder
-                        container(text("🖼").size(24))
-                            .width(Length::Fixed(40.0))
-                            .height(Length::Fixed(40.0))
-                            .center_x(Length::Fill)
-                            .center_y(Length::Fill),
-                        // Window title
-                        text(&toplevel.title)
-                            .size(if is_selected { 18 } else { 16 })
-                            .class(if is_selected {
-                                cosmic::theme::Text::Accent
-                            } else {
-                                cosmic::theme::Text::Default
-                            })
+                        screenshot_widget,
+                        // Window title and info
+                        column![
+                            text(&item.name)
+                                .size(if is_selected { 18 } else { 16 })
+                                .class(if is_selected {
+                                    cosmic::theme::Text::Accent
+                                } else {
+                                    cosmic::theme::Text::Default
+                                }),
+                            text(&item.description)
+                                .size(12)
+                                .class(cosmic::theme::Text::Default)
+                        ]
+                        .spacing(4)
                     ]
                     .spacing(10)
                     .align_y(Alignment::Center)
@@ -1028,3 +1082,4 @@ impl CosmicLauncher {
             .into()
     }
 }
+
