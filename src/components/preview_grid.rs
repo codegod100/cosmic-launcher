@@ -1,4 +1,4 @@
-use crate::backend::ToplevelInfo as TopLevel;
+use cosmic::cctk::toplevel_info::ToplevelInfo as TopLevel;
 use cosmic::{
     iced::widget::{button, image},
     theme,

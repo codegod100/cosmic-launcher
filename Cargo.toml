@@ -37,6 +37,7 @@ libcosmic = { git = "https://github.com/pop-os/libcosmic/", features = [
     "xdg-portal",
 ] }
 log = "0.4"
+memmap2 = "0.9"
 rustix = { version = "0.38", features = ["fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["std", "fmt", "env-filter"] }

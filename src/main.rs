@@ -2,7 +2,7 @@ mod components;
 #[rustfmt::skip]
 mod config;
 mod app;
-mod backend;
+mod wayland_subscription;
 mod localize;
 mod screenshot;
 mod cosmic_workspace_capture;

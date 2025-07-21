@@ -1341,6 +1341,7 @@ dependencies = [
  "image",
  "libcosmic",
  "log",
+ "memmap2 0.9.5",
  "nix 0.29.0",
  "once_cell",
  "pop-launcher",

@@ -1,9 +1,7 @@
 use crate::{app::iced::event::listen_raw, components, fl, screenshot::ScreenshotManager, subscriptions::launcher};
-use crate::backend::{self, Event, Cmd, ToplevelInfo, ExtForeignToplevelHandleV1, CaptureImage};
-#[cfg(not(feature = "mock-backend"))]
-use crate::backend::wayland as wayland_backend;
-#[cfg(feature = "mock-backend")] 
-use crate::backend::mock as backend;
+use crate::wayland_subscription::{WaylandUpdate, ToplevelUpdate, WaylandImage, wayland_subscription};
+use cosmic::cctk::toplevel_info::ToplevelInfo;
+use cosmic::cctk::wayland_protocols::ext::foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1;
 use clap::Parser;
 use cosmic::app::{Core, CosmicFlags, Settings, Task};
 use cosmic::cctk::sctk;
@@ -22,7 +20,7 @@ use cosmic::iced::platform_specific::shell::commands::{
     layer_surface::{Anchor, KeyboardInteractivity, destroy_layer_surface, get_layer_surface},
     overlap_notify,
 };
-use cosmic::iced::widget::{Column, column, container};
+use cosmic::iced::widget::{Column, column, container, image::{Handle, Image}};
 use cosmic::iced::{self, Length, Size, Subscription};
 use cosmic::iced_core::keyboard::key::Named;
 use cosmic::iced_core::widget::operation;
@@ -47,7 +45,6 @@ use cosmic::widget::{
 };
 use cosmic::{Element, keyboard_nav};
 use cosmic::{iced_runtime, surface};
-use cosmic::iced_winit::platform_specific::wayland::subsurface_widget::Subsurface;
 use iced::keyboard::Key;
 use iced::{Alignment, Color};
 use pop_launcher::{ContextOption, GpuPreference, IconSource, SearchResult};
@@ -175,11 +172,11 @@ pub struct CosmicLauncher {
     height: f32,
     needs_clear: bool,
 
-    toplevel_captures: HashMap<ExtForeignToplevelHandleV1, CaptureImage>,
+    toplevel_captures: HashMap<ExtForeignToplevelHandleV1, WaylandImage>,
     toplevels: Vec<ToplevelInfo>,
     active: Option<usize>, // For Alt+Tab selected window index
     #[allow(dead_code)]
-    backend_event_receiver: Option<mpsc::UnboundedReceiver<Event>>,
+    backend_event_receiver: Option<mpsc::UnboundedReceiver<WaylandUpdate>>,
 }
 
 #[derive(Debug, Clone)]
@@ -206,7 +203,7 @@ pub enum Message {
     Surface(surface::Action),
     PreviewAction(components::preview_grid::PreviewMessage),
 
-    BackendEvent(Event),
+    BackendEvent(WaylandUpdate),
 }
 
 impl CosmicLauncher {
@@ -302,7 +299,7 @@ impl CosmicLauncher {
         }
     }
 
-    fn find_screenshot_for_item(&self, item: &SearchResult) -> Option<&CaptureImage> {
+    fn find_screenshot_for_item(&self, item: &SearchResult) -> Option<&WaylandImage> {
         println!("DEBUG: Looking for screenshot for item: '{}' (window: {:?})", item.name, item.window.is_some());
         println!("DEBUG: Have {} toplevel_captures", self.toplevel_captures.len());
         println!("DEBUG: Have {} toplevels", self.toplevels.len());
@@ -747,45 +744,41 @@ impl cosmic::Application for CosmicLauncher {
                 println!("DEBUG: Received backend event: {:?}", 
                          std::mem::discriminant(&event));
                 match event {
-                Event::NewToplevel(handle, info) => {
-                    println!("DEBUG: New toplevel - title: '{}', handle: {:?}", info.title, handle);
-                    self.toplevels.push(info);
-                }
-                Event::UpdateToplevel(handle, info) => {
-                    println!("DEBUG: Update toplevel - title: '{}', handle: {:?}", info.title, handle);
-                    if let Some(t) = self
-                        .toplevels
-                        .iter_mut()
-                        .find(|t| t.foreign_toplevel == handle)
-                    {
-                        *t = info;
+                WaylandUpdate::Toplevel(toplevel_update) => {
+                    match toplevel_update {
+                        ToplevelUpdate::Add(info) => {
+                            println!("DEBUG: New toplevel - title: '{}'", info.title);
+                            self.toplevels.push(info);
+                        }
+                        ToplevelUpdate::Update(info) => {
+                            println!("DEBUG: Update toplevel - title: '{}'", info.title);
+                            if let Some(t) = self
+                                .toplevels
+                                .iter_mut()
+                                .find(|t| t.foreign_toplevel == info.foreign_toplevel)
+                            {
+                                *t = info;
+                            }
+                        }
+                        ToplevelUpdate::Remove(handle) => {
+                            println!("DEBUG: Close toplevel - handle: {:?}", handle);
+                            self.toplevels.retain(|t| t.foreign_toplevel != handle);
+                        }
                     }
                 }
-                Event::CloseToplevel(handle) => {
-                    println!("DEBUG: Close toplevel - handle: {:?}", handle);
-                    self.toplevels.retain(|t| t.foreign_toplevel != handle);
-                }
-                Event::CmdSender(_) => {
-                    println!("DEBUG: CmdSender event");
-                    // TODO: handle command sender
-                }
-                Event::Workspaces(_) => {
-                    println!("DEBUG: Workspaces event");
-                    // TODO: handle workspaces update
-                }
-                Event::WorkspaceCapture(_, _) => {
-                    println!("DEBUG: WorkspaceCapture event");
-                    // TODO: handle workspace capture
-                }
-                Event::ToplevelCapture(handle, capture_image) => {
+                WaylandUpdate::Image(handle, wayland_image) => {
                     // Store screenshot for the toplevel
                     println!("DEBUG: Storing screenshot for toplevel: {:?}", handle);
                     info!("Storing screenshot for toplevel: {:?}", handle);
-                    self.toplevel_captures.insert(handle, capture_image);
+                    self.toplevel_captures.insert(handle, wayland_image);
                 }
-                Event::ToplevelCapabilities(_) => {
-                    println!("DEBUG: ToplevelCapabilities event");
-                    // TODO: handle toplevel capabilities
+                WaylandUpdate::Init => {
+                    println!("DEBUG: Wayland init event");
+                    // TODO: handle wayland init if needed
+                }
+                WaylandUpdate::Finished => {
+                    println!("DEBUG: Wayland finished event");
+                    // TODO: handle wayland finished if needed
                 }
             }
             },
@@ -965,7 +958,7 @@ impl cosmic::Application for CosmicLauncher {
         println!("DEBUG: Setting up subscriptions for cosmic-launcher");
         info!("Setting up subscriptions for cosmic-launcher");
         Subscription::batch(vec![
-            backend::wayland::subscription(wayland_client::Connection::connect_to_env().unwrap()).map(Message::BackendEvent),
+            wayland_subscription().map(Message::BackendEvent),
             launcher::subscription(0).map(Message::LauncherEvent),
             listen_raw(|e, status, id| match e {
                 cosmic::iced::Event::PlatformSpecific(PlatformSpecific::Wayland(
@@ -1111,11 +1104,15 @@ impl CosmicLauncher {
                 let screenshot_widget: Element<Message> = if let Some(capture_image) = self.find_screenshot_for_item(item) {
                     println!("DEBUG: Found screenshot for window: {}", item.name);
                     info!("Found screenshot for window: {}", item.name);
-                    // Use the Subsurface widget with the wl_buffer
-                    Subsurface::new(capture_image.wl_buffer.clone())
-                        .width(Length::Fixed(120.0))
-                        .height(Length::Fixed(80.0))
-                        .into()
+                    // Use the Image widget with the WaylandImage
+                    Image::new(Handle::from_rgba(
+                        capture_image.width,
+                        capture_image.height,
+                        capture_image.img.clone(),
+                    ))
+                    .width(Length::Fixed(120.0))
+                    .height(Length::Fixed(80.0))
+                    .into()
                 } else {
                     println!("DEBUG: No screenshot found for window: {}, using fallback", item.name);
                     info!("No screenshot found for window: {}, using fallback", item.name);
