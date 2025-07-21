@@ -565,7 +565,7 @@ fn wayland_handler(tx: UnboundedSender<WaylandUpdate>) {
             break;
         }
         if let Err(e) = event_queue.blocking_dispatch(&mut app_data) {
-            println!("DEBUG: Wayland event dispatch failed: {}", e);
+            tracing::error!("Wayland event dispatch failed: {}", e);
             break;
         }
     }
