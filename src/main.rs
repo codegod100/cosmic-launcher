@@ -16,15 +16,18 @@ use crate::config::VERSION;
 fn main() -> cosmic::iced::Result {
     init_logging();
 
+    println!("DEBUG: Starting cosmic-launcher");
     info!(
         "cosmic-launcher ({})",
         <app::CosmicLauncher as cosmic::Application>::APP_ID
     );
     info!("Version: {} ({})", VERSION, config::profile());
+    println!("DEBUG: Version: {} ({})", VERSION, config::profile());
 
     // Prepare i18n
     localize();
 
+    println!("DEBUG: Running app");
     app::run()
 }
 

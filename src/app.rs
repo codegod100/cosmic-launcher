@@ -212,12 +212,20 @@ pub enum Message {
 impl CosmicLauncher {
     fn request(&self, r: launcher::Request) {
         debug!("request: {:?}", r);
+        println!("DEBUG: Sending request to pop-launcher: {:?}", r);
         if let Some(tx) = &self.tx {
+            info!("Sending request to pop-launcher: {:?}", r);
+            println!("DEBUG: TX found, sending request");
             if let Err(e) = tx.blocking_send(r) {
-                error!("tx: {e}");
+                error!("Failed to send request to pop-launcher: {e}");
+                println!("ERROR: Failed to send request: {}", e);
+            } else {
+                info!("Request sent successfully to pop-launcher");
+                println!("DEBUG: Request sent successfully");
             }
         } else {
-            info!("tx not found");
+            error!("tx not found - pop-launcher service not connected!");
+            println!("ERROR: TX not found - pop-launcher service not connected!");
         }
     }
 
@@ -295,22 +303,36 @@ impl CosmicLauncher {
     }
 
     fn find_screenshot_for_item(&self, item: &SearchResult) -> Option<&CaptureImage> {
+        println!("DEBUG: Looking for screenshot for item: '{}' (window: {:?})", item.name, item.window.is_some());
+        println!("DEBUG: Have {} toplevel_captures", self.toplevel_captures.len());
+        println!("DEBUG: Have {} toplevels", self.toplevels.len());
+        
         // If this launcher item represents a window, try to find matching screenshot
         if item.window.is_some() {
             // Try to match by window title/name with toplevels
-            for (handle, capture_image) in &self.toplevel_captures {
+            for (i, (handle, capture_image)) in self.toplevel_captures.iter().enumerate() {
+                println!("DEBUG: Checking capture {} with handle: {:?}", i, handle);
                 // Find corresponding toplevel info
                 if let Some(toplevel_info) = self.toplevels.iter().find(|t| t.foreign_toplevel == *handle) {
+                    println!("DEBUG: Found toplevel info with title: '{}'", toplevel_info.title);
                     // Match by title (item.description often contains the window title for windows)
                     if item.description.contains(&toplevel_info.title) 
                         || toplevel_info.title.contains(&item.description)
                         || item.name.contains(&toplevel_info.title)
                         || toplevel_info.title.contains(&item.name) {
+                        println!("DEBUG: Match found! Using screenshot for: {}", item.name);
                         return Some(capture_image);
+                    } else {
+                        println!("DEBUG: No match between '{}' and '{}'", item.description, toplevel_info.title);
                     }
+                } else {
+                    println!("DEBUG: No toplevel info found for handle: {:?}", handle);
                 }
             }
+        } else {
+            println!("DEBUG: Item '{}' is not a window", item.name);
         }
+        println!("DEBUG: No screenshot found for item: {}", item.name);
         None
     }
 }
@@ -476,10 +498,16 @@ impl cosmic::Application for CosmicLauncher {
             }
             Message::LauncherEvent(e) => match e {
                 launcher::Event::Started(tx) => {
+                    info!("Pop-launcher service started and connected");
+                    println!("DEBUG: Pop-launcher service started and connected");
                     self.tx.replace(tx);
+                    info!("Sending initial search request to pop-launcher");
+                    println!("DEBUG: Sending initial search request");
                     self.request(launcher::Request::Search(self.input_value.clone()));
                 }
                 launcher::Event::ServiceIsClosed => {
+                    info!("Pop-launcher service closed");
+                    println!("DEBUG: Pop-launcher service closed");
                     self.request(launcher::Request::ServiceIsClosed);
                 }
                 launcher::Event::Response(response) => match response {
@@ -556,10 +584,27 @@ impl cosmic::Application for CosmicLauncher {
                         }
                     }
                     pop_launcher::Response::Update(mut list) => {
+                        println!("DEBUG: Received launcher response with {} items", list.len());
+                        info!("Received launcher response with {} items", list.len());
+                        
+                        // Log the first few items for debugging
+                        for (i, item) in list.iter().take(3).enumerate() {
+                            info!("Item {}: name='{}', description='{}', window={:?}", 
+                                  i, item.name, item.description, item.window.is_some());
+                            println!("DEBUG: Item {}: name='{}', description='{}', window={:?}", 
+                                  i, item.name, item.description, item.window.is_some());
+                        }
+                        
                         if self.alt_tab && list.is_empty() {
+                            info!("Alt-tab mode but list is empty, hiding launcher");
+                            println!("DEBUG: Alt-tab mode but list is empty, hiding launcher");
                             return self.hide();
                         }
                         if self.alt_tab || self.input_value.is_empty() {
+                            info!("Reversing list (alt_tab={}, empty_input={})", 
+                                  self.alt_tab, self.input_value.is_empty());
+                            println!("DEBUG: Reversing list (alt_tab={}, empty_input={})", 
+                                  self.alt_tab, self.input_value.is_empty());
                             list.reverse();
                         }
                         list.sort_by(|a, b| {
@@ -568,7 +613,7 @@ impl cosmic::Application for CosmicLauncher {
                             a.cmp(&b)
                         });
 
-
+                        info!("Setting launcher_items to {} items", list.len());
 
                         self.launcher_items.splice(.., list);
                         if self.result_ids.len() < self.launcher_items.len() {
@@ -581,8 +626,10 @@ impl cosmic::Application for CosmicLauncher {
 
                         // Update screenshots for alt-tab mode and set active window
                         if self.alt_tab && self.launcher_state == LauncherState::AltTab {
+                            info!("In alt-tab mode, current active: {:?}", self.active);
                             // Set initial active window for alt-tab mode
                             if self.active.is_none() && !self.launcher_items.is_empty() {
+                                info!("Setting initial active window for alt-tab");
                                 // For ShiftAltTab, start from the last item
                                 if self.launcher_items.len() > 1 {
                                     self.active = Some(self.launcher_items.len() - 1);
@@ -696,11 +743,16 @@ impl cosmic::Application for CosmicLauncher {
                 });
             }
 
-            Message::BackendEvent(event) => match event {
+            Message::BackendEvent(event) => {
+                println!("DEBUG: Received backend event: {:?}", 
+                         std::mem::discriminant(&event));
+                match event {
                 Event::NewToplevel(handle, info) => {
+                    println!("DEBUG: New toplevel - title: '{}', handle: {:?}", info.title, handle);
                     self.toplevels.push(info);
                 }
                 Event::UpdateToplevel(handle, info) => {
+                    println!("DEBUG: Update toplevel - title: '{}', handle: {:?}", info.title, handle);
                     if let Some(t) = self
                         .toplevels
                         .iter_mut()
@@ -710,29 +762,42 @@ impl cosmic::Application for CosmicLauncher {
                     }
                 }
                 Event::CloseToplevel(handle) => {
+                    println!("DEBUG: Close toplevel - handle: {:?}", handle);
                     self.toplevels.retain(|t| t.foreign_toplevel != handle);
                 }
                 Event::CmdSender(_) => {
+                    println!("DEBUG: CmdSender event");
                     // TODO: handle command sender
                 }
                 Event::Workspaces(_) => {
+                    println!("DEBUG: Workspaces event");
                     // TODO: handle workspaces update
                 }
                 Event::WorkspaceCapture(_, _) => {
+                    println!("DEBUG: WorkspaceCapture event");
                     // TODO: handle workspace capture
                 }
                 Event::ToplevelCapture(handle, capture_image) => {
                     // Store screenshot for the toplevel
+                    println!("DEBUG: Storing screenshot for toplevel: {:?}", handle);
                     info!("Storing screenshot for toplevel: {:?}", handle);
                     self.toplevel_captures.insert(handle, capture_image);
                 }
                 Event::ToplevelCapabilities(_) => {
+                    println!("DEBUG: ToplevelCapabilities event");
                     // TODO: handle toplevel capabilities
                 }
+            }
             },
             Message::AltTab => {
                 // Show the launcher in Alt-Tab mode
+                println!("DEBUG: Alt+Tab pressed - switching to task switcher mode");
                 info!("Alt+Tab pressed - switching to task switcher mode");
+                info!("Current launcher_items count: {}", self.launcher_items.len());
+                info!("Current surface_state: {:?}", self.surface_state);
+                info!("Current launcher_state: {:?}", self.launcher_state);
+                println!("DEBUG: Current launcher_items count: {}", self.launcher_items.len());
+                println!("DEBUG: Current surface_state: {:?}", self.surface_state);
                 
                 // Set to alt-tab mode and enable alt_tab flag
                 self.launcher_state = LauncherState::AltTab;
@@ -740,15 +805,24 @@ impl cosmic::Application for CosmicLauncher {
                 
                 // Clear input and request window list through search
                 self.input_value.clear();
+                info!("Requesting window list from pop-launcher with empty search");
+                println!("DEBUG: Requesting window list from pop-launcher with empty search");
                 self.request(launcher::Request::Search(String::new()));
                 
                 // Show the surface if hidden
                 if self.surface_state == SurfaceState::Hidden {
+                    info!("Surface was hidden, setting to WaitingToBeShown");
+                    println!("DEBUG: Surface was hidden, setting to WaitingToBeShown");
                     self.surface_state = SurfaceState::WaitingToBeShown;
+                } else {
+                    info!("Surface state is already: {:?}", self.surface_state);
+                    println!("DEBUG: Surface state is already: {:?}", self.surface_state);
                 }
                 
                 // Select first available toplevel will be handled in the Response::Update
                 self.active = Some(0);
+                info!("Set active window to index 0");
+                println!("DEBUG: Set active window to index 0");
             }
             Message::ShiftAltTab => {
                 // Show the launcher in Alt-Tab mode and go backwards
@@ -856,9 +930,11 @@ impl cosmic::Application for CosmicLauncher {
 
     #[allow(clippy::too_many_lines)]
     fn view_window(&self, id: SurfaceId) -> Element<Self::Message> {
+        println!("DEBUG: view_window called with id: {:?}, my window_id: {:?}", id, self.window_id);
         if id == self.window_id {
             // Safety check to prevent overflow in surface sizing
             if !self.height.is_finite() || self.height > 10000.0 || self.height < 1.0 {
+                println!("DEBUG: Height issue, showing loading");
                 return container(text("Loading..."))
                     .width(Length::Fixed(400.0))
                     .height(Length::Fixed(100.0))
@@ -866,9 +942,16 @@ impl cosmic::Application for CosmicLauncher {
             }
 
             // Show different UI based on launcher state
+            println!("DEBUG: Current launcher_state: {:?}", self.launcher_state);
             match self.launcher_state {
-                LauncherState::AltTab => self.view_alt_tab(),
-                LauncherState::Search => self.view_search(),
+                LauncherState::AltTab => {
+                    println!("DEBUG: Rendering AltTab view");
+                    self.view_alt_tab()
+                },
+                LauncherState::Search => {
+                    println!("DEBUG: Rendering Search view");
+                    self.view_search()
+                },
             }
         } else {
             container(text(""))
@@ -879,6 +962,8 @@ impl cosmic::Application for CosmicLauncher {
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
+        println!("DEBUG: Setting up subscriptions for cosmic-launcher");
+        info!("Setting up subscriptions for cosmic-launcher");
         Subscription::batch(vec![
             backend::wayland::subscription(wayland_client::Connection::connect_to_env().unwrap()).map(Message::BackendEvent),
             launcher::subscription(0).map(Message::LauncherEvent),
@@ -899,9 +984,12 @@ impl cosmic::Application for CosmicLauncher {
                     ..
                 }) => match key {
                     Key::Character(c) => {
+                        println!("DEBUG: Key pressed: '{}', alt: {}, shift: {}", c, modifiers.alt(), modifiers.shift());
                         if c == "a" && modifiers.alt() && !modifiers.shift() {
+                            println!("DEBUG: Alt+A detected, triggering AltTab");
                             Some(Message::AltTab)
                         } else if c == "A" && modifiers.alt() && modifiers.shift() {
+                            println!("DEBUG: Alt+Shift+A detected, triggering ShiftAltTab");
                             Some(Message::ShiftAltTab) 
                         } else {
                             let nums = (1..=9)
@@ -935,7 +1023,10 @@ impl cosmic::Application for CosmicLauncher {
                         Some(Message::KeyboardNav(keyboard_nav::Action::FocusNext))
                     }
                     Key::Named(Named::Escape) => Some(Message::Hide),
-                    Key::Named(Named::Tab) => Some(Message::TabPress),
+                    Key::Named(Named::Tab) => {
+                        println!("DEBUG: Tab key pressed");
+                        Some(Message::TabPress)
+                    },
                     Key::Named(Named::Backspace)
                         if matches!(status, Status::Ignored) && modifiers.is_empty() =>
                     {
@@ -980,6 +1071,9 @@ impl CosmicLauncher {
     }
 
     fn view_alt_tab(&self) -> Element<Message> {
+        println!("DEBUG: Rendering Alt-Tab view with {} launcher_items", self.launcher_items.len());
+        info!("Rendering Alt-Tab view with {} launcher_items", self.launcher_items.len());
+        
         let mut content = column![]
             .spacing(10)
             .align_x(Alignment::Center);
@@ -1000,21 +1094,31 @@ impl CosmicLauncher {
 
         // List of launcher items (windows) in alt-tab mode
         if self.launcher_items.is_empty() {
+            println!("DEBUG: No launcher items found, showing 'No windows open' message");
+            info!("No launcher items found, showing 'No windows open' message");
             content = content.push(text("No windows open").size(16));
         } else {
+            println!("DEBUG: Rendering {} windows in alt-tab view", self.launcher_items.len());
+            info!("Rendering {} windows in alt-tab view", self.launcher_items.len());
             let mut windows_column = column![].spacing(5);
             
             for (idx, item) in self.launcher_items.iter().enumerate() {
                 let is_selected = self.active == Some(idx);
+                println!("DEBUG: Rendering window {}: '{}' (selected: {})", idx, item.name, is_selected);
+                info!("Rendering window {}: '{}' (selected: {})", idx, item.name, is_selected);
                 
                 // Try to get screenshot for this item
                 let screenshot_widget: Element<Message> = if let Some(capture_image) = self.find_screenshot_for_item(item) {
+                    println!("DEBUG: Found screenshot for window: {}", item.name);
+                    info!("Found screenshot for window: {}", item.name);
                     // Use the Subsurface widget with the wl_buffer
                     Subsurface::new(capture_image.wl_buffer.clone())
                         .width(Length::Fixed(120.0))
                         .height(Length::Fixed(80.0))
                         .into()
                 } else {
+                    println!("DEBUG: No screenshot found for window: {}, using fallback", item.name);
+                    info!("No screenshot found for window: {}, using fallback", item.name);
                     // Fallback to text placeholder
                     container(text("📄").size(48))
                         .width(Length::Fixed(120.0))
