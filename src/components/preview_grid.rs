@@ -1,36 +1,30 @@
+use crate::backend::ToplevelInfo as TopLevel;
 use cosmic::{
-    widget::{container, image, text, row, column},
-    Element as CosmicElement, iced::Length,
+    iced::widget::{button, image},
+    theme,
+    Element as CosmicElement,
 };
-use pop_launcher::SearchResult;
+use cosmic::{
+    iced::{Alignment, Length},
+    widget::{column, container, row, text},
+};
 
 pub struct WindowPreview {
-    pub window_id: Option<(u32, u32)>,
-    pub title: String,
-    pub description: String,
-    pub screenshot: Option<cosmic::widget::image::Handle>,
+    pub toplevel: TopLevel,
     pub selected: bool,
+    pub screenshot: Option<image::Handle>,
 }
 
 impl WindowPreview {
-    pub fn from_search_result(result: &SearchResult, selected: bool) -> Self {
-        let window_id = result.window;
-        let (title, description) = if result.window.is_some() {
-            (result.description.clone(), result.name.clone())
-        } else {
-            (result.name.clone(), result.description.clone())
-        };
-
+    pub fn new(toplevel: TopLevel, selected: bool) -> Self {
         Self {
-            window_id,
-            title,
-            description,
-            screenshot: None,
+            toplevel,
             selected,
+            screenshot: None,
         }
     }
 
-    pub fn with_screenshot(mut self, screenshot: cosmic::widget::image::Handle) -> Self {
+    pub fn with_screenshot(mut self, screenshot: image::Handle) -> Self {
         self.screenshot = Some(screenshot);
         self
     }
@@ -42,72 +36,74 @@ pub enum PreviewMessage {
     WindowActivated(usize),
 }
 
-pub fn create_preview_grid(previews: Vec<WindowPreview>, selected_index: usize) -> CosmicElement<'static, PreviewMessage> {
-    let columns = 3;
-    let thumbnail_size = (256.0, 144.0);
-    let spacing = 16.0;
-    
+pub fn create_preview_grid(
+    previews: Vec<WindowPreview>,
+    _selected_index: usize,
+) -> CosmicElement<'static, PreviewMessage> {
+    let columns = 1;
+    let thumbnail_size = (400.0, 200.0);
+    let spacing = 8.0;
+
     let rows = (previews.len() + columns - 1) / columns;
-    let mut grid_rows = Vec::new();
-    
-    for row in 0..rows {
+    let mut grid_rows: Vec<cosmic::Element<crate::app::Message>> = Vec::new();
+
+    for row_idx in 0..rows {
         let mut row_widgets = Vec::new();
-        
-        for col in 0..columns {
-            let index = row * columns + col;
+
+        for col_idx in 0..columns {
+            let index = row_idx * columns + col_idx;
             if index < previews.len() {
                 let preview = &previews[index];
-                let is_selected = index == selected_index;
-                
-                let thumbnail_content = if let Some(ref handle) = preview.screenshot {
-                    image(handle.clone())
-                        .width(thumbnail_size.0)
-                        .height(thumbnail_size.1)
-                        .into()
+                let is_selected = preview.selected;
+
+                let thumbnail_content = if let Some(handle) = preview.screenshot.clone() {
+                    container(image::viewer(handle))
                 } else {
-                    container(
-                        text("No Preview")
-                            .size(14)
-                    )
-                    .width(thumbnail_size.0)
-                    .height(thumbnail_size.1)
-                    .center_x(Length::Shrink)
-                    .center_y(Length::Shrink)
-                    .into()
-                };
+                    container(text("Loading..."))
+                }
+                .width(thumbnail_size.0)
+                .height(thumbnail_size.1)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill);
 
-                let title_text = text(preview.title.clone())
-                    .size(12);
+                let title_text = text(preview.toplevel.title.clone()).size(12);
 
-                let preview_content = cosmic::widget::column::with_children(vec![
-                    thumbnail_content,
-                    title_text.into(),
-                ]);
-
-                let preview_container = container(preview_content)
-                    .padding(12)
-                    .width(Length::Fixed(thumbnail_size.0 + 24.0));
-
-                let widget = if is_selected {
-                    container(preview_container)
-                        .padding(2)
-                        .into()
-                } else {
-                    preview_container.into()
-                };
-                
-                row_widgets.push(widget);
+                let preview_button = button(
+                    {
+                        let mut col = column();
+                        col = col.push(thumbnail_content);
+                        col = col.push(title_text);
+                        col.spacing(4).align_x(Alignment::Center)
+                    }
+                        .align_x(Alignment::Center),
+                )
+                .on_press(PreviewMessage::WindowActivated(index));                row_widgets.push(
+                    container(preview_button)
+                        .padding(8)
+                        .width(Length::Fixed(thumbnail_size.0 + 16.0))
+                        .into(),
+                );
             }
         }
-        
-        let row_element = cosmic::widget::row::with_children(row_widgets);
-        
+
+        let mut row_element = row();
+        for widget in row_widgets {
+            row_element = row_element.push(widget);
+        }
+        row_element = row_element.spacing(spacing);
+
         grid_rows.push(row_element.into());
     }
-    
-    let grid_column = cosmic::widget::column::with_children(grid_rows)
+
+    {
+        let mut col = column();
+        for row in grid_rows {
+            col = col.push(row);
+        }
+        col
+    }
+        .spacing(spacing)
         .width(Length::Fill)
-        .height(Length::Fill);
-    
-    grid_column.into()
+        .height(Length::Fill)
+        .into()
 }

@@ -2,8 +2,10 @@ mod components;
 #[rustfmt::skip]
 mod config;
 mod app;
+mod backend;
 mod localize;
 mod screenshot;
+mod cosmic_workspace_capture;
 mod subscriptions;
 use tracing::info;
 
