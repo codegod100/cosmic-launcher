@@ -146,17 +146,12 @@ pub enum SurfaceState {
     WaitingToBeShown,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LauncherState {
-    Search,    // Normal search/launcher mode
-    AltTab,    // Alt+Tab task switcher mode
-}
+
 
 pub struct CosmicLauncher {
     core: Core,
     input_value: String,
     surface_state: SurfaceState,
-    launcher_state: LauncherState,
     launcher_items: Vec<SearchResult>,
     tx: Option<mpsc::Sender<launcher::Request>>,
     menu: Option<(u32, Vec<ContextOption>)>,
@@ -183,7 +178,6 @@ pub struct CosmicLauncher {
 pub enum Message {
     InputChanged(String),
     Backspace,
-    TabPress,
     CompleteFocusedId(Id),
     Activate(Option<usize>),
     Context(usize),
@@ -246,7 +240,6 @@ impl CosmicLauncher {
         self.focused = 0;
         self.alt_tab = false;
         self.active = None;
-        self.launcher_state = LauncherState::Search; // Reset to search mode
         self.queue.clear();
 
         self.request(launcher::Request::Close);
@@ -400,7 +393,6 @@ impl cosmic::Application for CosmicLauncher {
                 core,
                 input_value: String::new(),
                 surface_state: SurfaceState::Hidden,
-                launcher_state: LauncherState::AltTab, // Start in Alt+Tab mode for debugging
                 launcher_items: Vec::new(),
                 tx: None,
                 menu: None,
@@ -448,31 +440,6 @@ impl cosmic::Application for CosmicLauncher {
                 // self.input_value.pop();
                 // self.request(launcher::Request::Search(self.input_value.clone()));
             }
-            Message::TabPress => {
-                println!("DEBUG: TabPress received: state={:?}, active={:?}", self.launcher_state, self.active);
-                info!("TabPress received: state={:?}, active={:?}", self.launcher_state, self.active);
-                match self.launcher_state {
-                    LauncherState::Search => {
-                        let focused = self.focused;
-                        self.focused = 0;
-                        return cosmic::task::message(cosmic::Action::App(
-                            Self::Message::CompleteFocusedId(self.result_ids[focused].clone()),
-                        ));
-                    }
-                    LauncherState::AltTab => {
-                        // Cycle to next window in Alt-Tab mode
-                        if !self.launcher_items.is_empty() {
-                            let current = self.active.unwrap_or(0);
-                            let next = (current + 1) % self.launcher_items.len();
-                            self.active = Some(next);
-                            println!("DEBUG: Tab cycling - current: {}, next: {}, total items: {}", current, next, self.launcher_items.len());
-                            info!("Alt+Tab: cycling from window {} to window {} (of {})", current, next, self.launcher_items.len());
-                        } else {
-                            println!("DEBUG: No launcher items to cycle through!");
-                        }
-                    }
-                }
-            }
             Message::CompleteFocusedId(id) => {
                 let i = self
                     .result_ids
@@ -485,9 +452,10 @@ impl cosmic::Application for CosmicLauncher {
                 }
             }
             Message::Activate(i) => {
-                let index = match self.launcher_state {
-                    LauncherState::Search => i.unwrap_or(self.focused),
-                    LauncherState::AltTab => i.unwrap_or(self.active.unwrap_or(0)),
+                let index = if self.alt_tab {
+                    i.unwrap_or(self.active.unwrap_or(0))
+                } else {
+                    i.unwrap_or(self.focused)
                 };
                 
                 if let Some(item) = self.launcher_items.get(index) {
@@ -632,7 +600,7 @@ impl cosmic::Application for CosmicLauncher {
                         }
 
                         // Update screenshots for alt-tab mode and set active window
-                        if self.alt_tab && self.launcher_state == LauncherState::AltTab {
+                        if self.alt_tab {
                             // Set initial active window for alt-tab mode
                             if let Some(current_active) = self.active {
                                 // Adjust the active index if it's beyond the list size
@@ -712,69 +680,60 @@ impl cosmic::Application for CosmicLauncher {
             Message::KeyboardNav(e) => {
                 match e {
                     keyboard_nav::Action::FocusNext => {
-                        match self.launcher_state {
-                            LauncherState::Search => {
-                                self.focus_next();
-                                // TODO ideally we could use an operation to scroll exactly to a specific widget.
-                                return iced_runtime::task::widget(operation::scrollable::snap_to(
-                                    SCROLLABLE.clone(),
-                                    RelativeOffset {
-                                        x: 0.,
-                                        y: (self.focused as f32
-                                            / (self.launcher_items.len() as f32 - 1.).max(1.))
-                                        .max(0.0),
-                                    },
-                                ));
+                        if self.alt_tab {
+                            // Cycle to next window in Alt-Tab mode (same as Tab)
+                            if !self.launcher_items.is_empty() {
+                                let current = self.active.unwrap_or(0);
+                                let next = (current + 1) % self.launcher_items.len();
+                                self.active = Some(next);
+                                println!("DEBUG: Arrow down - cycling from {} to {} (of {})", current, next, self.launcher_items.len());
                             }
-                            LauncherState::AltTab => {
-                                // Cycle to next window in Alt-Tab mode (same as Tab)
-                                if !self.launcher_items.is_empty() {
-                                    let current = self.active.unwrap_or(0);
-                                    let next = (current + 1) % self.launcher_items.len();
-                                    self.active = Some(next);
-                                    println!("DEBUG: Arrow down - cycling from {} to {} (of {})", current, next, self.launcher_items.len());
-                                }
-                            }
+                        } else {
+                            self.focus_next();
+                            // TODO ideally we could use an operation to scroll exactly to a specific widget.
+                            return iced_runtime::task::widget(operation::scrollable::snap_to(
+                                SCROLLABLE.clone(),
+                                RelativeOffset {
+                                    x: 0.,
+                                    y: (self.focused as f32
+                                        / (self.launcher_items.len() as f32 - 1.).max(1.))
+                                    .max(0.0),
+                                },
+                            ));
                         }
                     }
                     keyboard_nav::Action::FocusPrevious => {
-                        match self.launcher_state {
-                            LauncherState::Search => {
-                                self.focus_previous();
-                                return iced_runtime::task::widget(operation::scrollable::snap_to(
-                                    SCROLLABLE.clone(),
-                                    RelativeOffset {
-                                        x: 0.,
-                                        y: (self.focused as f32
-                                            / (self.launcher_items.len() as f32 - 1.).max(1.))
-                                        .max(0.0),
-                                    },
-                                ));
+                        if self.alt_tab {
+                            // Cycle to previous window in Alt-Tab mode
+                            if !self.launcher_items.is_empty() {
+                                let current = self.active.unwrap_or(0);
+                                let prev = if current == 0 {
+                                    self.launcher_items.len() - 1
+                                } else {
+                                    current - 1
+                                };
+                                self.active = Some(prev);
+                                println!("DEBUG: Arrow up - cycling from {} to {} (of {})", current, prev, self.launcher_items.len());
                             }
-                            LauncherState::AltTab => {
-                                // Cycle to previous window in Alt-Tab mode
-                                if !self.launcher_items.is_empty() {
-                                    let current = self.active.unwrap_or(0);
-                                    let prev = if current == 0 {
-                                        self.launcher_items.len() - 1
-                                    } else {
-                                        current - 1
-                                    };
-                                    self.active = Some(prev);
-                                    println!("DEBUG: Arrow up - cycling from {} to {} (of {})", current, prev, self.launcher_items.len());
-                                }
-                            }
+                        } else {
+                            self.focus_previous();
+                            return iced_runtime::task::widget(operation::scrollable::snap_to(
+                                SCROLLABLE.clone(),
+                                RelativeOffset {
+                                    x: 0.,
+                                    y: (self.focused as f32
+                                        / (self.launcher_items.len() as f32 - 1.).max(1.))
+                                    .max(0.0),
+                                },
+                            ));
                         }
                     }
                     keyboard_nav::Action::Escape => {
-                        match self.launcher_state {
-                            LauncherState::Search => {
-                                self.input_value.clear();
-                                self.request(launcher::Request::Search(String::new()));
-                            }
-                            LauncherState::AltTab => {
-                                return self.hide();
-                            }
+                        if self.alt_tab {
+                            return self.hide();
+                        } else {
+                            self.input_value.clear();
+                            self.request(launcher::Request::Search(String::new()));
                         }
                     }
                     _ => {}
@@ -799,12 +758,11 @@ impl cosmic::Application for CosmicLauncher {
             },
             Message::AltTab => {
                 // Show the launcher in Alt-Tab mode
-                println!("DEBUG: AltTab pressed - current state: alt_tab={}, launcher_state={:?}, surface_state={:?}", 
-                    self.alt_tab, self.launcher_state, self.surface_state);
+                println!("DEBUG: AltTab pressed - current state: alt_tab={}, surface_state={:?}", 
+                    self.alt_tab, self.surface_state);
                 info!("Alt+Tab pressed - switching to task switcher mode");
 
                 // Set to alt-tab mode and enable alt_tab flag
-                self.launcher_state = LauncherState::AltTab;
                 self.alt_tab = true;
 
                 // Clear input and request window list through search
@@ -816,8 +774,7 @@ impl cosmic::Application for CosmicLauncher {
 
                 // Select first available toplevel will be handled in the Response::Update
                 self.active = Some(0);
-                println!("DEBUG: AltTab setup complete - alt_tab={}, launcher_state={:?}", 
-                    self.alt_tab, self.launcher_state);
+                println!("DEBUG: AltTab setup complete - alt_tab={}", self.alt_tab);
                 return task;
             }
             Message::ShiftAltTab => {
@@ -826,7 +783,6 @@ impl cosmic::Application for CosmicLauncher {
                 info!("Shift+Alt+Tab pressed - switching to task switcher mode (reverse)");
 
                 // Set to alt-tab mode and enable alt_tab flag
-                self.launcher_state = LauncherState::AltTab;
                 self.alt_tab = true;
 
                 // Clear input and request window list through search
@@ -842,11 +798,11 @@ impl cosmic::Application for CosmicLauncher {
                 return task;
             }
             Message::AltRelease => {
-                println!("DEBUG: AltRelease message received, alt_tab={}, launcher_state={:?}, surface_state={:?}", 
-                    self.alt_tab, self.launcher_state, self.surface_state);
+                println!("DEBUG: AltRelease message received, alt_tab={}, surface_state={:?}", 
+                    self.alt_tab, self.surface_state);
                 
                 // Always hide on Alt release if we're in Alt+Tab mode, regardless of other flags
-                if self.launcher_state == LauncherState::AltTab {
+                if self.alt_tab {
                     // Activate the currently selected window in Alt+Tab mode first
                     let selected_index = self.active.unwrap_or(0);
                     println!("DEBUG: Alt released - activating window at index {} then hiding", selected_index);
@@ -926,15 +882,10 @@ impl cosmic::Application for CosmicLauncher {
             }
 
             // Show different UI based on launcher state
-            match self.launcher_state {
-                LauncherState::AltTab => {
-                    self.view_alt_tab()
-                },
-                LauncherState::Search => {
-                    // Temporarily comment out search mode for debugging
-                    // self.view_search()
-                    self.view_alt_tab() // Use Alt+Tab view for debugging
-                },
+            if self.alt_tab {
+                self.view_alt_tab()
+            } else {
+                self.view_search()
             }
         } else {
             container(text(""))
@@ -981,8 +932,8 @@ impl cosmic::Application for CosmicLauncher {
                             println!("DEBUG: Raw Alt+Tab");
                             return Some(Message::AltTab);
                         } else {
-                            println!("DEBUG: Raw Tab");
-                            return Some(Message::TabPress);
+                            println!("DEBUG: Raw Tab - focusing next");
+                            return Some(Message::KeyboardNav(keyboard_nav::Action::FocusNext));
                         }
                     }
                     // Handle number activation
