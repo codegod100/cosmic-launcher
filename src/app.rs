@@ -41,6 +41,7 @@ use cosmic::widget::{
     button, mouse_area, text,
     text_input,
 };
+use cosmic::iced::widget::text::Wrapping;
 use cosmic::{Element, keyboard_nav};
 use cosmic::{iced_runtime, surface};
 use iced::keyboard::Key;
@@ -226,8 +227,8 @@ impl CosmicLauncher {
                 keyboard_interactivity: KeyboardInteractivity::Exclusive,
                 anchor: Anchor::TOP,
                 namespace: "launcher".into(),
-                size: Some((Some(600), Some(1600))),
-                size_limits: Limits::NONE.min_width(600.0).min_height(1600.0).max_width(600.0).max_height(1600.0),
+                size: Some((Some(1200), Some(1600))), // Increased width from 600 to 1200
+                size_limits: Limits::NONE.min_width(1200.0).min_height(1600.0).max_width(1200.0).max_height(1600.0),
                 exclusive_zone: -1,
                 ..Default::default()
             }),
@@ -1036,21 +1037,81 @@ impl cosmic::Application for CosmicLauncher {
 }
 
 impl CosmicLauncher {
+    fn create_grid_layout<'a>(&self, items: Vec<Element<'a, Message>>, columns: usize) -> Element<'a, Message> {
+        if items.is_empty() {
+            return column![].into();
+        }
+
+        let rows = (items.len() + columns - 1) / columns;
+        let mut grid_rows: Vec<Element<'a, Message>> = Vec::new();
+        let mut item_iter = items.into_iter();
+
+        for _row_idx in 0..rows {
+            let mut row_items: Vec<Element<'a, Message>> = Vec::new();
+            
+            for _col_idx in 0..columns {
+                if let Some(item) = item_iter.next() {
+                    row_items.push(item);
+                }
+            }
+            
+            if !row_items.is_empty() {
+                let mut row_element = row![];
+                for item in row_items {
+                    row_element = row_element.push(item);
+                }
+                grid_rows.push(row_element.spacing(10).into());
+            }
+        }
+
+        let mut grid_column = column![];
+        for grid_row in grid_rows {
+            grid_column = grid_column.push(grid_row);
+        }
+        
+        grid_column.spacing(8).into()
+    }
+
     fn create_search_item_element<'a>(&self, item: &'a SearchResult, idx: usize, is_focused: bool) -> Element<'a, Message> {
         // For search results, dispatch based on whether we have a screenshot, not item.window
         let icon_element = if let Some(wayland_image) = self.find_screenshot_for_item(item) {
-            // If we have a screenshot, show window preview
+            // If we have a screenshot, show both window preview AND app icon
             let handle = Handle::from_rgba(
                 wayland_image.width,
                 wayland_image.height,
                 wayland_image.img.clone()
             );
+            
+            // Create app icon element
+            let app_icon = match &item.icon {
+                Some(IconSource::Name(icon_name)) => {
+                    icon::from_name(icon_name.clone()).size(16)
+                }
+                Some(IconSource::Mime(_mime_type)) => {
+                    icon::from_name("text-x-generic").size(16)
+                }
+                _ => {
+                    icon::from_name("application-x-executable").size(16)
+                }
+            };
+            
+            // Show screenshot with small app icon overlay
             container(
-                Image::new(handle)
-                    .width(Length::Fixed(32.0))
-                    .height(Length::Fixed(24.0))
+                row![
+                    Image::new(handle)
+                        .width(Length::Fixed(32.0))
+                        .height(Length::Fixed(24.0))
+                        .content_fit(cosmic::iced::ContentFit::Fill),
+                    container(app_icon)
+                        .width(Length::Fixed(20.0))
+                        .height(Length::Fixed(20.0))
+                        .center_x(Length::Fill)
+                        .center_y(Length::Fill)
+                ]
+                .spacing(4)
+                .align_y(Alignment::Center)
             )
-            .width(Length::Fixed(40.0))
+            .width(Length::Fixed(60.0))
             .height(Length::Fixed(30.0))
             .center_x(Length::Fill)
             .center_y(Length::Fill)
@@ -1128,24 +1189,25 @@ impl CosmicLauncher {
                         column![
                             // App name
                             if is_focused {
-                                text(display_name).size(14).class(cosmic::theme::Text::Accent)
+                                text(display_name).size(14).class(cosmic::theme::Text::Accent).wrapping(Wrapping::Word)
                             } else {
-                                text(display_name).size(14)
+                                text(display_name).size(14).wrapping(Wrapping::Word)
                             },
                             // Description (if available)
                             if let Some(desc) = description {
-                                text(desc).size(12).class(cosmic::theme::Text::Default)
+                                text(desc).size(12).class(cosmic::theme::Text::Default).wrapping(Wrapping::Word)
                             } else {
                                 text("").size(0) // Empty placeholder
                             }
                         ]
                         .spacing(2)
+                        .width(Length::Fixed(360.0)) // Adjusted width to account for wider icon area
                     }
                 ]
                 .spacing(12)
                 .align_y(Alignment::Center)
             )
-            .padding(10) // Consistent padding - no size changes
+            .padding(12) // Consistent padding with window items
             .width(Length::Fixed(450.0))
             .class(if is_focused {
                 cosmic::theme::Container::Primary
@@ -1163,19 +1225,43 @@ impl CosmicLauncher {
         
         // Create preview image or fallback icon - fixed size and centered
         let preview_element = if let Some(wayland_image) = screenshot {
-            // Use actual window screenshot as preview
+            // Use actual window screenshot as preview with app icon
             let handle = Handle::from_rgba(
                 wayland_image.width,
                 wayland_image.height,
                 wayland_image.img.clone()
             );
+            
+            // Create app icon element
+            let app_icon = match &item.icon {
+                Some(IconSource::Name(icon_name)) => {
+                    icon::from_name(icon_name.clone()).size(20)
+                }
+                Some(IconSource::Mime(_mime_type)) => {
+                    icon::from_name("text-x-generic").size(20)
+                }
+                _ => {
+                    icon::from_name("application-x-executable").size(20)
+                }
+            };
+            
             container(
-                Image::new(handle)
-                    .width(Length::Fixed(100.0))
-                    .height(Length::Fixed(75.0))
+                column![
+                    Image::new(handle)
+                        .width(Length::Fixed(100.0))
+                        .height(Length::Fixed(75.0))
+                        .content_fit(cosmic::iced::ContentFit::Fill),
+                    container(app_icon)
+                        .width(Length::Fixed(24.0))
+                        .height(Length::Fixed(24.0))
+                        .center_x(Length::Fill)
+                        .center_y(Length::Fill)
+                ]
+                .spacing(4)
+                .align_x(Alignment::Center)
             )
             .width(Length::Fixed(100.0))
-            .height(Length::Fixed(75.0))
+            .height(Length::Fixed(105.0)) // Increased height to accommodate app icon
             .center_x(Length::Fill)
             .center_y(Length::Fill)
         } else {
@@ -1228,7 +1314,7 @@ impl CosmicLauncher {
             container(content)
                 .padding(12) // Consistent padding - no size changes
                 .width(Length::Fixed(520.0))
-                .height(Length::Fixed(90.0))
+                .height(Length::Fixed(120.0)) // Increased height to accommodate app icon below screenshot
                 .class(if is_selected {
                     cosmic::theme::Container::Primary // Use primary highlight for selection
                 } else {
@@ -1252,7 +1338,7 @@ impl CosmicLauncher {
                     text("Search Mode").size(20),
                     text_input::search_input(fl!("type-to-search"), &self.input_value)
                         .on_input(Message::InputChanged)
-                        .width(400)
+                        .width(600) // Increased width
                         .id(INPUT_ID.clone())
                 ]
                 .spacing(10)
@@ -1264,17 +1350,24 @@ impl CosmicLauncher {
 
         // Show search results if any - use same field as alt-tab (description) with proper icons
         if !self.launcher_items.is_empty() {
-            let mut results_column = column![].spacing(6);
+            let mut result_elements: Vec<Element<Message>> = Vec::new();
             
             for (idx, item) in self.launcher_items.iter().enumerate() {
                 let is_focused = self.focused == idx;
                 
                 // Use the specialized search item element that shows proper icons/previews
                 let result_item = self.create_search_item_element(item, idx, is_focused);
-                results_column = results_column.push(result_item);
+                result_elements.push(result_item);
             }
             
-            content = content.push(results_column);
+            // Create grid layout with 2 columns for search results in a wider container
+            let grid = self.create_grid_layout(result_elements, 2);
+            content = content.push(
+                container(grid)
+                    .width(Length::Fixed(1000.0)) // Wide container for grid
+                    .padding(20)
+                    .class(cosmic::theme::Container::Card)
+            );
         }
 
         container(content)
@@ -1306,7 +1399,7 @@ impl CosmicLauncher {
         if self.launcher_items.is_empty() {
             content = content.push(text("No windows open").size(16));
         } else {
-            let mut windows_column = column![].spacing(8);
+            let mut window_elements: Vec<Element<Message>> = Vec::new();
             
             for (idx, item) in self.launcher_items.iter().enumerate() {
                 let is_selected = self.active == Some(idx);
@@ -1314,11 +1407,17 @@ impl CosmicLauncher {
                 
                 // Use reusable window item element
                 let window_item = self.create_window_item_element(item, idx, is_selected);
-                windows_column = windows_column.push(window_item);
+                window_elements.push(window_item);
             }
             
-            // Non-scrollable window list
-            content = content.push(windows_column);
+            // Create grid layout with 2 columns for window items in a wider container
+            let grid = self.create_grid_layout(window_elements, 2);
+            content = content.push(
+                container(grid)
+                    .width(Length::Fixed(1100.0)) // Wide container for window grid
+                    .padding(20)
+                    .class(cosmic::theme::Container::Card)
+            );
         }
 
         // Single container wrapper with top margin to move away from screen edge
@@ -1341,7 +1440,7 @@ impl CosmicLauncher {
                     text("Launcher").size(24),
                     text_input::search_input(fl!("type-to-search"), &self.input_value)
                         .on_input(Message::InputChanged)
-                        .width(500)
+                        .width(600) // Increased width
                         .id(INPUT_ID.clone())
                 ]
                 .spacing(8)
@@ -1355,7 +1454,7 @@ impl CosmicLauncher {
         if self.launcher_items.is_empty() {
             content = content.push(text("No windows open").size(16));
         } else {
-            let mut items_column = column![].spacing(8);
+            let mut item_elements: Vec<Element<Message>> = Vec::new();
             
             for (idx, item) in self.launcher_items.iter().enumerate() {
                 let is_selected = self.active == Some(idx);
@@ -1371,10 +1470,19 @@ impl CosmicLauncher {
                     let is_focused = self.focused == idx;
                     self.create_search_item_element(item, idx, is_focused)
                 };
-                items_column = items_column.push(item_element);
+                item_elements.push(item_element);
             }
             
-            content = content.push(items_column);
+            // Create grid layout with 2 columns in a wide container
+            let grid = self.create_grid_layout(item_elements, 2);
+            content = content.push(
+                container(grid)
+                    .width(Length::Fixed(
+                        if self.input_value.trim().is_empty() { 1100.0 } else { 1000.0 }
+                    )) // Adjust width based on content type
+                    .padding(20)
+                    .class(cosmic::theme::Container::Card)
+            );
         }
 
         container(content)

@@ -40,7 +40,7 @@ pub fn create_preview_grid(
     previews: Vec<WindowPreview>,
     _selected_index: usize,
 ) -> CosmicElement<'static, PreviewMessage> {
-    let columns = 1;
+    let columns = 2;
     let thumbnail_size = (400.0, 200.0);
     let spacing = 8.0;
 
