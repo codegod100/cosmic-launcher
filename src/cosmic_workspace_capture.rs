@@ -1,8 +1,10 @@
+#![allow(dead_code)]
+
 use cosmic::{
     cctk::{
         screencopy::{CaptureSource, ScreencopyState},
-        toplevel_info::{ToplevelInfoHandler, ToplevelInfoState},
-        toplevel_management::{ToplevelManagerHandler, ToplevelManagerState},
+        toplevel_info::{ToplevelInfoState},
+        toplevel_management::{ToplevelManagerState},
     },
     widget::{self, image::Handle as ImageHandle},
     Element as CosmicElement,
@@ -57,9 +59,9 @@ impl CosmicCaptureManager {
         // Check if we have this toplevel registered
         if let Some(toplevel_handle) = self.toplevels.get(title) {
             // Try to start real capture using CaptureSource::Toplevel
-            if let Some(screencopy_state) = &self.screencopy_state {
+            if let Some(_screencopy_state) = &self.screencopy_state {
                 println!("🎯 Found toplevel handle for '{}', starting capture", title);
-                let capture_source = CaptureSource::Toplevel(toplevel_handle.clone());
+                let _capture_source = CaptureSource::Toplevel(toplevel_handle.clone());
                 // TODO: Actually start capture with screencopy_state.capture()
                 // For now, fall through to test pattern
             }
@@ -90,7 +92,7 @@ impl CosmicCaptureManager {
         let height = 150u32;
         let mut image_data = Vec::new();
         
-        for y in 0..height {
+        for _y in 0..height {
             for x in 0..width {
                 // Create a gradient pattern
                 let fade = (x * 255 / width) as u8;

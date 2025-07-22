@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::cosmic_workspace_capture::create_toplevel_capture_element;
 
 // Simplified screenshot manager - only uses COSMIC native capture

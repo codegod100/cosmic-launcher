@@ -1,4 +1,4 @@
-use crate::{app::iced::event::listen_raw, components, fl, subscriptions::launcher};
+use crate::{app::iced::event::listen_raw, subscriptions::launcher};
 use crate::wayland_subscription::{WaylandUpdate, ToplevelUpdate, WaylandImage, wayland_subscription};
 use cosmic::cctk::toplevel_info::ToplevelInfo;
 use cosmic::cctk::wayland_protocols::ext::foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1;
@@ -23,7 +23,7 @@ use cosmic::iced::widget::{column, container, image::{Handle, Image}};
 use cosmic::iced::{self, Length, Size, Subscription};
 use cosmic::iced_core::keyboard::key::Named;
 use cosmic::iced_core::widget::operation;
-use cosmic::iced_core::{Padding, Point, Rectangle, window};
+use cosmic::iced_core::{Point, Rectangle, window};
 use cosmic::iced_runtime::core::event::wayland::LayerEvent;
 use cosmic::iced_runtime::core::event::{PlatformSpecific, wayland};
 use cosmic::iced_runtime::core::layout::Limits;
@@ -31,15 +31,14 @@ use cosmic::iced_runtime::core::window::{Event as WindowEvent, Id as SurfaceId};
 use cosmic::iced_widget::row;
 use cosmic::iced_widget::scrollable::RelativeOffset;
 use cosmic::iced_winit::commands::overlap_notify::overlap_notify;
-use cosmic::theme::Button;
 use cosmic::widget::icon;
 use cosmic::widget::{
-    button, mouse_area, text,
+    mouse_area, text,
     text_input,
 };
 use cosmic::iced::widget::text::Wrapping;
 use cosmic::{Element, keyboard_nav};
-use cosmic::{iced_runtime, surface};
+use cosmic::iced_runtime;
 use iced::keyboard::Key;
 use pop_launcher::{ContextOption, GpuPreference, IconSource, SearchResult};
 use serde::{Deserialize, Serialize};
@@ -52,15 +51,11 @@ use std::{
 };
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
-use unicode_width::UnicodeWidthStr;
 
-static AUTOSIZE_ID: LazyLock<Id> = LazyLock::new(|| Id::new("autosize"));
-static MAIN_ID: LazyLock<Id> = LazyLock::new(|| Id::new("main"));
 static INPUT_ID: LazyLock<Id> = LazyLock::new(|| Id::new("input_id"));
 static SCROLLABLE: LazyLock<Id> = LazyLock::new(|| Id::new("scrollable"));
 
 pub(crate) static MENU_ID: LazyLock<SurfaceId> = LazyLock::new(SurfaceId::unique);
-const SCROLL_MIN: usize = 8;
 
 #[derive(Parser, Debug, Serialize, Deserialize, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -116,21 +111,6 @@ pub fn run() -> cosmic::iced::Result {
     )
 }
 
-pub fn menu_button<'a, Message: Clone + 'a>(
-    content: impl Into<Element<'a, Message>>,
-) -> cosmic::widget::Button<'a, Message> {
-    button::custom(content)
-        .class(Button::AppletMenu)
-        .padding(menu_control_padding())
-        .width(Length::Fill)
-}
-
-pub fn menu_control_padding() -> Padding {
-    let theme = cosmic::theme::active();
-    let cosmic = theme.cosmic();
-    [cosmic.space_xxs(), cosmic.space_m()].into()
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SurfaceState {
     Visible,
@@ -174,9 +154,6 @@ pub enum Message {
     Backspace,
     CompleteFocusedId(Id),
     Activate(Option<usize>),
-    Context(usize),
-    MenuButton(u32, u32),
-    CloseContextMenu,
     CursorMoved(Point<f32>),
     Hide,
     LauncherEvent(launcher::Event),
@@ -189,8 +166,6 @@ pub enum Message {
     AltRelease,
     SuperRelease,
     Overlap(OverlapNotifyEvent),
-    Surface(surface::Action),
-    PreviewAction(components::preview_grid::PreviewMessage),
 
     BackendEvent(WaylandUpdate),
     DebouncedSearch(String), // For debounced search after delay
@@ -392,7 +367,7 @@ impl cosmic::Application for CosmicLauncher {
         core.set_keyboard_nav(false);
 
         // Create backend subscription 
-        let conn = wayland_client::Connection::connect_to_env()
+        let _conn = wayland_client::Connection::connect_to_env()
             .expect("Failed to connect to Wayland display");
 
         (
@@ -499,28 +474,11 @@ impl cosmic::Application for CosmicLauncher {
                     self.request(launcher::Request::Activate(item.id));
                     // Hide immediately after activation for responsive UI
                     return self.hide();
-                } else {
-                    return self.hide();
                 }
-            }
-            Message::Context(i) => {
-                if self.menu.take().is_some() {
-                    return commands::popup::destroy_popup(*MENU_ID);
-                }
-
-                if let Some(item) = self.launcher_items.get(i) {
-                    self.request(launcher::Request::Context(item.id));
-                }
+                return self.hide();
             }
             Message::CursorMoved(pos) => {
                 self.cursor_position = Some(pos);
-            }
-            Message::MenuButton(i, context) => {
-                self.request(launcher::Request::ActivateContext(i, context));
-
-                if self.menu.take().is_some() {
-                    return commands::popup::destroy_popup(*MENU_ID);
-                }
             }
             Message::Opened(size, window_id) => {
                 if window_id == self.window_id {
@@ -708,11 +666,6 @@ impl cosmic::Application for CosmicLauncher {
                 }
                 _ => {}
             },
-            Message::CloseContextMenu => {
-                if self.menu.take().is_some() {
-                    return commands::popup::destroy_popup(*MENU_ID);
-                }
-            }
             Message::Hide => {
                 if self.menu.take().is_some() {
                     return commands::popup::destroy_popup(*MENU_ID);
@@ -846,12 +799,6 @@ impl cosmic::Application for CosmicLauncher {
                     return self.hide();
                 }
             }
-            Message::Surface(_) => {
-                // TODO: handle surface action
-            }
-            Message::PreviewAction(_) => {
-                // TODO: handle preview action
-            }
         }
         Task::none()
     }
@@ -955,12 +902,12 @@ impl cosmic::Application for CosmicLauncher {
         Task::none()
     }
 
-    fn view(&self) -> Element<Self::Message> {
+    fn view(&self) -> Element<'_, Self::Message> {
         unreachable!("No main window")
     }
 
     #[allow(clippy::too_many_lines)]
-    fn view_window(&self, id: SurfaceId) -> Element<Self::Message> {
+    fn view_window(&self, id: SurfaceId) -> Element<'_, Self::Message> {
         if id == self.window_id {
             // Safety check to prevent overflow in surface sizing
             if !self.height.is_finite() || self.height > 10000.0 || self.height < 1.0 {
@@ -1041,7 +988,7 @@ impl cosmic::Application for CosmicLauncher {
                             .map(|n| (n.to_string(), ((n + 10) % 10) - 1))
                             .chain((0..=0).map(|n| (n.to_string(), ((n + 10) % 10) - 1)))
                             .collect::<Vec<_>>();
-                        if let Some(&(ref s, idx)) = nums.iter().find(|&&(ref s, _)| s == &c) {
+                        if let Some(&(ref _s, idx)) = nums.iter().find(|&&(ref s, _)| s == &c) {
                             return Some(Message::Activate(Some(idx)));
                         }
                     }
@@ -1228,7 +1175,7 @@ impl CosmicLauncher {
                         let description = if let Some(dash_pos) = item.name.find(" - ") {
                             // Get everything after " - "
                             Some(item.name[dash_pos + 3..].trim())
-                        } else if let Some(paren_pos) = item.name.find('(') {
+                        } else if let Some(_paren_pos) = item.name.find('(') {
                             // Look for description in the description field instead
                             if !item.description.trim().is_empty() && item.description != item.name {
                                 Some(item.description.trim())
@@ -1381,7 +1328,7 @@ impl CosmicLauncher {
         .into()
     }
 
-    fn view_search(&self) -> Element<Message> {
+    fn view_search(&self) -> Element<'_, Message> {
         let mut content = column![]
             .spacing(15)
             .align_x(Alignment::Center);
@@ -1391,7 +1338,7 @@ impl CosmicLauncher {
             container(
                 column![
                     text("Launcher").size(24),
-                    text_input::search_input(fl!("type-to-search"), &self.input_value)
+                    text_input::search_input("Type to search", &self.input_value)
                         .on_input(Message::InputChanged)
                         .width(600) // Increased width
                         .id(INPUT_ID.clone())
@@ -1445,7 +1392,7 @@ impl CosmicLauncher {
             .into()
     }
 
-    fn view_alt_tab(&self) -> Element<Message> {
+    fn view_alt_tab(&self) -> Element<'_, Message> {
         let mut content = column![]
             .spacing(15)
             .align_x(Alignment::Center);

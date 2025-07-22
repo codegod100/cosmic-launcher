@@ -2,6 +2,8 @@
 // borrows the column element from iced widgets
 // and draws oddly indexed children first
 
+#![allow(dead_code)]
+
 use cosmic::iced_core::{
     event::{self, Event},
     layout, mouse, overlay, renderer,

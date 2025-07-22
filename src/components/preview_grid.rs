@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use cosmic::cctk::toplevel_info::ToplevelInfo as TopLevel;
 use cosmic::{
     iced::widget::{button, image},
@@ -53,7 +55,7 @@ pub fn create_preview_grid(
             let index = row_idx * columns + col_idx;
             if index < previews.len() {
                 let preview = &previews[index];
-                let is_selected = preview.selected;
+                let _is_selected = preview.selected;
 
                 let thumbnail_content = if let Some(handle) = preview.screenshot.clone() {
                     container(image::viewer(handle))

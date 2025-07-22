@@ -273,7 +273,7 @@ impl Session {
         self.condvar.notify_all();
     }
 
-    fn wait_while<F: FnMut(&SessionInner) -> bool>(&self, mut f: F) -> MutexGuard<SessionInner> {
+    fn wait_while<F: FnMut(&SessionInner) -> bool>(&self, mut f: F) -> MutexGuard<'_, SessionInner> {
         self.condvar
             .wait_while(self.inner.lock().unwrap(), |data| f(data))
             .unwrap()
