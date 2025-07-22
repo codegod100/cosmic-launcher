@@ -1,4 +1,4 @@
-use crate::{app::iced::event::listen_raw, components, fl, screenshot::ScreenshotManager, subscriptions::launcher};
+use crate::{app::iced::event::listen_raw, components, fl, subscriptions::launcher};
 use crate::wayland_subscription::{WaylandUpdate, ToplevelUpdate, WaylandImage, wayland_subscription};
 use cosmic::cctk::toplevel_info::ToplevelInfo;
 use cosmic::cctk::wayland_protocols::ext::foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1;
@@ -6,7 +6,7 @@ use clap::Parser;
 use cosmic::app::{Core, CosmicFlags, Settings, Task};
 use cosmic::cctk::sctk;
 use cosmic::dbus_activation::Details;
-use cosmic::iced::alignment::{Horizontal, Vertical};
+use cosmic::iced::alignment::Alignment;
 use cosmic::iced::event::Status;
 use cosmic::iced::event::wayland::OverlapNotifyEvent;
 use cosmic::iced::id::Id;
@@ -20,11 +20,11 @@ use cosmic::iced::platform_specific::shell::commands::{
     layer_surface::{Anchor, KeyboardInteractivity, destroy_layer_surface, get_layer_surface},
     overlap_notify,
 };
-use cosmic::iced::widget::{Column, column, container, image::{Handle, Image}};
+use cosmic::iced::widget::{column, container, image::{Handle, Image}};
 use cosmic::iced::{self, Length, Size, Subscription};
 use cosmic::iced_core::keyboard::key::Named;
 use cosmic::iced_core::widget::operation;
-use cosmic::iced_core::{Border, Padding, Point, Rectangle, Shadow, window};
+use cosmic::iced_core::{Padding, Point, Rectangle, window};
 use cosmic::iced_runtime::core::event::wayland::LayerEvent;
 use cosmic::iced_runtime::core::event::{PlatformSpecific, wayland};
 use cosmic::iced_runtime::core::layout::Limits;
@@ -35,18 +35,15 @@ use cosmic::iced_runtime::platform_specific::wayland::{
 use cosmic::iced_widget::row;
 use cosmic::iced_widget::scrollable::RelativeOffset;
 use cosmic::iced_winit::commands::overlap_notify::overlap_notify;
-use cosmic::theme::{self, Button, Container};
-use cosmic::widget::icon::{IconFallback, from_name};
-use cosmic::widget::id_container;
+use cosmic::theme::Button;
+use cosmic::widget::icon;
 use cosmic::widget::{
-    autosize, button, divider, horizontal_space, icon, mouse_area, scrollable, text,
-    text_input::{self, StyleSheet as TextInputStyleSheet},
-    vertical_space,
+    button, mouse_area, text,
+    text_input,
 };
 use cosmic::{Element, keyboard_nav};
 use cosmic::{iced_runtime, surface};
 use iced::keyboard::Key;
-use iced::{Alignment};
 use pop_launcher::{ContextOption, GpuPreference, IconSource, SearchResult};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
@@ -167,6 +164,7 @@ pub struct CosmicLauncher {
     margin: f32,
     height: f32,
     needs_clear: bool,
+    search_debounce_timer: Option<Instant>, // Timer for debounced search
 
     toplevel_captures: HashMap<ExtForeignToplevelHandleV1, WaylandImage>,
     toplevels: Vec<ToplevelInfo>,
@@ -200,6 +198,7 @@ pub enum Message {
     PreviewAction(components::preview_grid::PreviewMessage),
 
     BackendEvent(WaylandUpdate),
+    DebouncedSearch(String), // For debounced search after delay
 }
 
 impl CosmicLauncher {
@@ -221,7 +220,7 @@ impl CosmicLauncher {
         self.surface_state = SurfaceState::Visible;
         self.needs_clear = true;
 
-        Task::batch(vec![
+        let mut tasks = vec![
             get_layer_surface(SctkLayerSurfaceSettings {
                 id: self.window_id,
                 keyboard_interactivity: KeyboardInteractivity::Exclusive,
@@ -233,7 +232,17 @@ impl CosmicLauncher {
                 ..Default::default()
             }),
             overlap_notify(self.window_id, true),
-        ])
+        ];
+
+        // Focus search input when showing in super launcher mode - delay it slightly
+        if self.super_launcher_mode {
+            tasks.push(Task::perform(
+                async { tokio::time::sleep(tokio::time::Duration::from_millis(50)).await; },
+                |_| cosmic::Action::App(Message::CompleteFocusedId(INPUT_ID.clone())),
+            ));
+        }
+
+        Task::batch(tasks)
     }
 
     fn hide(&mut self) -> Task<Message> {
@@ -243,6 +252,7 @@ impl CosmicLauncher {
         self.active = None;
         self.alt_tab_mode = false; // Reset Alt+Tab mode
         self.super_launcher_mode = false; // Reset Super launcher mode
+        self.search_debounce_timer = None; // Clear search debounce timer
         self.queue.clear();
 
         self.request(launcher::Request::Close);
@@ -417,6 +427,7 @@ impl cosmic::Application for CosmicLauncher {
                 toplevels: Vec::new(),
                 active: None,
                 backend_event_receiver: None,
+                search_debounce_timer: None,
             },
             Task::none(),
         )
@@ -434,26 +445,45 @@ impl cosmic::Application for CosmicLauncher {
     fn update(&mut self, message: Message) -> Task<Self::Message> {
         match message {
             Message::InputChanged(value) => {
-                // Enable input changes in super launcher mode
+                // Always update input value immediately for responsive UI
+                self.input_value.clone_from(&value);
+                
+                // Set debounce timer for search in super launcher mode
                 if self.super_launcher_mode {
-                    self.input_value.clone_from(&value);
-                    self.request(launcher::Request::Search(value));
+                    self.search_debounce_timer = Some(Instant::now());
+                    return Task::perform(
+                        async move {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+                            value
+                        },
+                        |search_term| cosmic::Action::App(Message::DebouncedSearch(search_term)),
+                    );
                 }
-                // Commented out for pure Alt+Tab mode
-                // self.input_value.clone_from(&value);
-                // self.request(launcher::Request::Search(value));
             }
             Message::Backspace => {
-                // Enable backspace in super launcher mode
+                // Always update input value immediately for responsive UI
+                self.input_value.pop();
+                
+                // Set debounce timer for search in super launcher mode
                 if self.super_launcher_mode {
-                    self.input_value.pop();
-                    self.request(launcher::Request::Search(self.input_value.clone()));
+                    self.search_debounce_timer = Some(Instant::now());
+                    let value = self.input_value.clone();
+                    return Task::perform(
+                        async move {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+                            value
+                        },
+                        |search_term| cosmic::Action::App(Message::DebouncedSearch(search_term)),
+                    );
                 }
-                // Commented out for pure Alt+Tab mode
-                // self.input_value.pop();
-                // self.request(launcher::Request::Search(self.input_value.clone()));
             }
             Message::CompleteFocusedId(id) => {
+                // Handle both search activation and focus requests
+                if id == INPUT_ID.clone() {
+                    // This is a focus request for the input field
+                    return cosmic::widget::text_input::focus(INPUT_ID.clone());
+                }
+                
                 let i = self
                     .result_ids
                     .iter()
@@ -629,6 +659,14 @@ impl cosmic::Application for CosmicLauncher {
                         if self.surface_state == SurfaceState::WaitingToBeShown {
                             cmds.push(self.show());
                         }
+
+                        // Auto-focus search input when in super launcher mode - do this AFTER showing
+                        if self.super_launcher_mode {
+                            cmds.push(cosmic::widget::text_input::focus(
+                                INPUT_ID.clone(),
+                            ));
+                        }
+
                         return Task::batch(cmds);
                     }
                     pop_launcher::Response::Fill(s) => {
@@ -732,6 +770,16 @@ impl cosmic::Application for CosmicLauncher {
                 WaylandUpdate::Init => {}
                 WaylandUpdate::Finished => {}
             },
+            Message::DebouncedSearch(search_term) => {
+                // Only perform search if this is the most recent debounce timer
+                if let Some(timer) = self.search_debounce_timer {
+                    // Check if enough time has passed and input matches
+                    if timer.elapsed() >= Duration::from_millis(250) && search_term == self.input_value {
+                        self.request(launcher::Request::Search(search_term));
+                        self.search_debounce_timer = None;
+                    }
+                }
+            }
             Message::AltTab => {
                 // Cycle to next window in the list
                 if !self.launcher_items.is_empty() {
@@ -798,7 +846,15 @@ impl cosmic::Application for CosmicLauncher {
                     self.request(launcher::Request::Search(String::new()));
 
                     self.surface_state = SurfaceState::WaitingToBeShown;
-                    return Task::none();
+                    
+                    // Focus search input when launcher opens - use multiple attempts
+                    return Task::batch(vec![
+                        cosmic::widget::text_input::focus(INPUT_ID.clone()),
+                        Task::perform(
+                            async { tokio::time::sleep(tokio::time::Duration::from_millis(100)).await; },
+                            |_| cosmic::Action::App(Message::CompleteFocusedId(INPUT_ID.clone())),
+                        ),
+                    ]);
                 }
             }
             Details::ActivateAction { action, .. } => {
@@ -980,6 +1036,127 @@ impl cosmic::Application for CosmicLauncher {
 }
 
 impl CosmicLauncher {
+    fn create_search_item_element<'a>(&self, item: &'a SearchResult, idx: usize, is_focused: bool) -> Element<'a, Message> {
+        // For search results, dispatch based on whether we have a screenshot, not item.window
+        let icon_element = if let Some(wayland_image) = self.find_screenshot_for_item(item) {
+            // If we have a screenshot, show window preview
+            let handle = Handle::from_rgba(
+                wayland_image.width,
+                wayland_image.height,
+                wayland_image.img.clone()
+            );
+            container(
+                Image::new(handle)
+                    .width(Length::Fixed(32.0))
+                    .height(Length::Fixed(24.0))
+            )
+            .width(Length::Fixed(40.0))
+            .height(Length::Fixed(30.0))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+        } else {
+            // If no screenshot available, show the app icon based on IconSource
+            match &item.icon {
+                Some(IconSource::Name(icon_name)) => {
+                    container(
+                        icon::from_name(icon_name.clone())
+                            .size(20)
+                    )
+                    .width(Length::Fixed(40.0))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                }
+                Some(IconSource::Mime(_mime_type)) => {
+                    // For mime types, use a generic document icon
+                    container(
+                        icon::from_name("text-x-generic")
+                            .size(20)
+                    )
+                    .width(Length::Fixed(40.0))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                }
+                _ => {
+                    // For items without specific icons, try common fallback icon names
+                    container(
+                        icon::from_name("application-x-executable")
+                            .size(20)
+                    )
+                    .width(Length::Fixed(40.0))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                }
+            }
+        };
+
+        // Create clickable search result item
+        mouse_area(
+            container(
+                row![
+                    icon_element,
+                    // Show app name and description
+                    {
+                        let display_name = if let Some(paren_pos) = item.name.find('(') {
+                            // Extract everything before the first '(' - e.g., "Flatpak (System)" -> "Flatpak"
+                            item.name[..paren_pos].trim()
+                        } else if let Some(dash_pos) = item.name.find(" - ") {
+                            // Extract everything before " - " - e.g., "Firefox - Web Browser" -> "Firefox"
+                            item.name[..dash_pos].trim()
+                        } else {
+                            // Use the full name if no parsing patterns found
+                            item.name.trim()
+                        };
+                        
+                        // Extract description part if available
+                        let description = if let Some(dash_pos) = item.name.find(" - ") {
+                            // Get everything after " - "
+                            Some(item.name[dash_pos + 3..].trim())
+                        } else if let Some(paren_pos) = item.name.find('(') {
+                            // Look for description in the description field instead
+                            if !item.description.trim().is_empty() && item.description != item.name {
+                                Some(item.description.trim())
+                            } else {
+                                None
+                            }
+                        } else if !item.description.trim().is_empty() && item.description != item.name {
+                            // Use description field if it's different from name
+                            Some(item.description.trim())
+                        } else {
+                            None
+                        };
+                        
+                        column![
+                            // App name
+                            if is_focused {
+                                text(display_name).size(14).class(cosmic::theme::Text::Accent)
+                            } else {
+                                text(display_name).size(14)
+                            },
+                            // Description (if available)
+                            if let Some(desc) = description {
+                                text(desc).size(12).class(cosmic::theme::Text::Default)
+                            } else {
+                                text("").size(0) // Empty placeholder
+                            }
+                        ]
+                        .spacing(2)
+                    }
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center)
+            )
+            .padding(10) // Consistent padding - no size changes
+            .width(Length::Fixed(450.0))
+            .class(if is_focused {
+                cosmic::theme::Container::Primary
+            } else {
+                cosmic::theme::Container::Card
+            })
+        )
+        .on_press(Message::Activate(Some(idx)))
+        .into()
+    }
+
     fn create_window_item_element<'a>(&self, item: &'a SearchResult, idx: usize, is_selected: bool) -> Element<'a, Message> {
         // Try to find screenshot for this window
         let screenshot = self.find_screenshot_for_item(item);
@@ -1002,15 +1179,30 @@ impl CosmicLauncher {
             .center_x(Length::Fill)
             .center_y(Length::Fill)
         } else {
-            // Fallback to emoji icon if no screenshot available
-            container(
-                text(if is_selected { "▶️" } else { "🪟" })
-                    .size(32)
-            )
-            .width(Length::Fixed(100.0))
-            .height(Length::Fixed(75.0))
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
+            // Fallback: try to show app icon if available, otherwise use window emoji
+            match &item.icon {
+                Some(IconSource::Name(icon_name)) => {
+                    container(
+                        icon::from_name(icon_name.clone())
+                            .size(40)
+                    )
+                    .width(Length::Fixed(100.0))
+                    .height(Length::Fixed(75.0))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                }
+                _ => {
+                    // Final fallback to emoji icon if no app icon available
+                    container(
+                        text(if is_selected { "▶️" } else { "🪟" })
+                            .size(32)
+                    )
+                    .width(Length::Fixed(100.0))
+                    .height(Length::Fixed(75.0))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                }
+            }
         };
 
         // Create consistent window item with same styling across modes, but make it clickable
@@ -1070,45 +1262,15 @@ impl CosmicLauncher {
             .class(cosmic::theme::Container::Card) // Add background card styling
         );
 
-        // Show search results if any - use same field as alt-tab (description)
+        // Show search results if any - use same field as alt-tab (description) with proper icons
         if !self.launcher_items.is_empty() {
             let mut results_column = column![].spacing(6);
             
             for (idx, item) in self.launcher_items.iter().enumerate() {
                 let is_focused = self.focused == idx;
                 
-                // Create clickable search result item using description field like alt-tab
-                let result_item = mouse_area(
-                    container(
-                        row![
-                            // Icon placeholder or small preview
-                            container(
-                                text(if item.window.is_some() { "🪟" } else { "📱" })
-                                    .size(20)
-                            )
-                            .width(Length::Fixed(40.0))
-                            .center_x(Length::Fill)
-                            .center_y(Length::Fill),
-                            // Use description field like alt-tab window list with color for selection
-                            if is_focused {
-                                text(&item.description).size(14).class(cosmic::theme::Text::Accent)
-                            } else {
-                                text(&item.description).size(14)
-                            }
-                        ]
-                        .spacing(12)
-                        .align_y(Alignment::Center)
-                    )
-                    .padding(10) // Consistent padding - no size changes
-                    .width(Length::Fixed(450.0))
-                    .class(if is_focused {
-                        cosmic::theme::Container::Primary
-                    } else {
-                        cosmic::theme::Container::Card
-                    })
-                )
-                .on_press(Message::Activate(Some(idx)));
-                
+                // Use the specialized search item element that shows proper icons/previews
+                let result_item = self.create_search_item_element(item, idx, is_focused);
                 results_column = results_column.push(result_item);
             }
             
@@ -1189,22 +1351,30 @@ impl CosmicLauncher {
             .class(cosmic::theme::Container::Card) // Add background card styling
         );
 
-        // Window list below search - reuse Alt+Tab styling for consistency
+        // Show results below search - use search item elements when there's input, window elements when empty
         if self.launcher_items.is_empty() {
             content = content.push(text("No windows open").size(16));
         } else {
-            let mut windows_column = column![].spacing(8);
+            let mut items_column = column![].spacing(8);
             
             for (idx, item) in self.launcher_items.iter().enumerate() {
                 let is_selected = self.active == Some(idx);
                 println!("DEBUG: Super launcher rendering item {} - '{}', selected: {}", idx, item.name, is_selected);
                 
-                // Use the same reusable window item element for consistency
-                let window_item = self.create_window_item_element(item, idx, is_selected);
-                windows_column = windows_column.push(window_item);
+                // Use search item elements when searching (input not empty) to show clean app names
+                // Use window item elements when browsing (input empty) to show window titles
+                let item_element = if self.input_value.trim().is_empty() {
+                    // Browsing mode - show window titles using window item element
+                    self.create_window_item_element(item, idx, is_selected)
+                } else {
+                    // Search mode - show clean app names using search item element
+                    let is_focused = self.focused == idx;
+                    self.create_search_item_element(item, idx, is_focused)
+                };
+                items_column = items_column.push(item_element);
             }
             
-            content = content.push(windows_column);
+            content = content.push(items_column);
         }
 
         container(content)
