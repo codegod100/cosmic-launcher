@@ -14,13 +14,10 @@ use cosmic::{
         toplevel_info::{ToplevelInfo, ToplevelInfoHandler, ToplevelInfoState},
         wayland_client::{
             globals::registry_queue_init,
-            protocol::{wl_output::WlOutput, wl_buffer, wl_shm, wl_shm_pool},
+            protocol::{wl_buffer, wl_shm, wl_shm_pool},
             Connection, QueueHandle, Dispatch, WEnum,
         },
-        wayland_protocols::ext::{
-            foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
-            workspace::v1::client::ext_workspace_handle_v1::ExtWorkspaceHandleV1,
-        },
+        wayland_protocols::ext::foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
         sctk::{
             registry::{ProvidesRegistryState, RegistryState},
             seat::{SeatHandler, SeatState},
@@ -38,7 +35,7 @@ use image::EncodableLayout;
 use once_cell::sync::Lazy;
 use std::{
     fmt::Debug,
-    os::fd::{AsFd, FromRawFd, RawFd},
+    os::fd::AsFd,
     sync::{Arc, Condvar, Mutex, MutexGuard},
 };
 use tokio::sync::Mutex as TokioMutex;

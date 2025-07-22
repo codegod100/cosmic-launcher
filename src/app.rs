@@ -52,7 +52,6 @@ use std::{
 };
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
-use unicode_truncate::UnicodeTruncateStr;
 use unicode_width::UnicodeWidthStr;
 
 static AUTOSIZE_ID: LazyLock<Id> = LazyLock::new(|| Id::new("autosize"));

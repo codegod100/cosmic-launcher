@@ -3,9 +3,7 @@ use cosmic::{
         screencopy::{CaptureSource, ScreencopyState},
         toplevel_info::{ToplevelInfoHandler, ToplevelInfoState},
         toplevel_management::{ToplevelManagerHandler, ToplevelManagerState},
-        wayland_client::{Connection, QueueHandle},
     },
-    iced_winit::platform_specific::wayland::subsurface_widget::Subsurface,
     widget::{self, image::Handle as ImageHandle},
     Element as CosmicElement,
 };
