@@ -159,6 +159,7 @@ pub struct CosmicLauncher {
     focused: usize,
     last_hide: Instant,
     alt_tab_mode: bool, // Track if we're in Alt+Tab mode
+    super_launcher_mode: bool, // Track if we're in Super key launcher mode (Alt+Tab list with search)
     window_id: window::Id,
     queue: VecDeque<Message>,
     result_ids: Vec<Id>,
@@ -193,6 +194,7 @@ pub enum Message {
     ShiftAltTab,
     Opened(Size, window::Id),
     AltRelease,
+    SuperRelease,
     Overlap(OverlapNotifyEvent),
     Surface(surface::Action),
     PreviewAction(components::preview_grid::PreviewMessage),
@@ -240,6 +242,7 @@ impl CosmicLauncher {
         self.focused = 0;
         self.active = None;
         self.alt_tab_mode = false; // Reset Alt+Tab mode
+        self.super_launcher_mode = false; // Reset Super launcher mode
         self.queue.clear();
 
         self.request(launcher::Request::Close);
@@ -399,6 +402,7 @@ impl cosmic::Application for CosmicLauncher {
                 focused: 0,
                 last_hide: Instant::now(),
                 alt_tab_mode: false,
+                super_launcher_mode: false,
                 window_id: window::Id::unique(),
                 queue: VecDeque::new(),
                 result_ids: (0..10)
@@ -430,12 +434,22 @@ impl cosmic::Application for CosmicLauncher {
     fn update(&mut self, message: Message) -> Task<Self::Message> {
         match message {
             Message::InputChanged(value) => {
-                // Commented out for Alt+Tab debugging
+                // Enable input changes in super launcher mode
+                if self.super_launcher_mode {
+                    self.input_value.clone_from(&value);
+                    self.request(launcher::Request::Search(value));
+                }
+                // Commented out for pure Alt+Tab mode
                 // self.input_value.clone_from(&value);
                 // self.request(launcher::Request::Search(value));
             }
             Message::Backspace => {
-                // Commented out for Alt+Tab debugging
+                // Enable backspace in super launcher mode
+                if self.super_launcher_mode {
+                    self.input_value.pop();
+                    self.request(launcher::Request::Search(self.input_value.clone()));
+                }
+                // Commented out for pure Alt+Tab mode
                 // self.input_value.pop();
                 // self.request(launcher::Request::Search(self.input_value.clone()));
             }
@@ -591,19 +605,18 @@ impl cosmic::Application for CosmicLauncher {
                         }
 
                         // Update screenshots for alt-tab mode and set active window
-                        if !self.launcher_items.is_empty() && self.alt_tab_mode {
-                            // Set initial active window for alt-tab mode
+                        if !self.launcher_items.is_empty() && (self.alt_tab_mode || self.super_launcher_mode) {
+                            // Set initial active window for alt-tab mode or super launcher mode
                             if let Some(current_active) = self.active {
                                 // Adjust the active index if it's beyond the list size
                                 if current_active >= self.launcher_items.len() {
-                                    // If we set index 1 for ShiftAltTab but only have 1 item, use index 0
                                     self.active = Some(0);
-                                    println!("DEBUG: Adjusted Alt+Tab selection to window 0 (only {} items)", self.launcher_items.len());
+                                    println!("DEBUG: Adjusted selection to window 0 (only {} items)", self.launcher_items.len());
                                 }
                             } else {
-                                // Default to first window if no active selection in Alt+Tab mode
+                                // Default to first window if no active selection
                                 self.active = Some(0);
-                                println!("DEBUG: Setting initial Alt+Tab selection to window 0");
+                                println!("DEBUG: Setting initial selection to window 0");
                             }
                         }
                         let mut cmds = Vec::new();
@@ -743,12 +756,21 @@ impl cosmic::Application for CosmicLauncher {
             }
             Message::AltRelease => {
                 // On Alt release, activate the currently selected window and hide
-                let selected_index = self.active.unwrap_or(0);
-                println!("DEBUG: Alt released - activating window at index {} then hiding", selected_index);
-                if let Some(item) = self.launcher_items.get(selected_index) {
-                    self.request(launcher::Request::Activate(item.id));
+                if self.alt_tab_mode {
+                    let selected_index = self.active.unwrap_or(0);
+                    println!("DEBUG: Alt released - activating window at index {} then hiding", selected_index);
+                    if let Some(item) = self.launcher_items.get(selected_index) {
+                        self.request(launcher::Request::Activate(item.id));
+                    }
+                    return self.hide();
                 }
-                return self.hide();
+            }
+            Message::SuperRelease => {
+                // On Super release, just hide if in super launcher mode
+                if self.super_launcher_mode {
+                    println!("DEBUG: Super key released in launcher mode");
+                    return self.hide();
+                }
             }
             Message::Surface(_) => {
                 // TODO: handle surface action
@@ -771,6 +793,8 @@ impl cosmic::Application for CosmicLauncher {
                 }
                 // hack: allow to close the launcher from the panel button
                 if self.last_hide.elapsed().as_millis() > 100 {
+                    // Enable Super launcher mode (Alt+Tab list with search)
+                    self.super_launcher_mode = true;
                     self.request(launcher::Request::Search(String::new()));
 
                     self.surface_state = SurfaceState::WaitingToBeShown;
@@ -832,9 +856,11 @@ impl cosmic::Application for CosmicLauncher {
                     .height(Length::Fixed(100.0))
                     .into();
             }
-            // Show alt-tab view when in alt-tab mode, otherwise show search view
+            // Show appropriate view based on mode
             if self.alt_tab_mode {
                 self.view_alt_tab()
+            } else if self.super_launcher_mode {
+                self.view_super_launcher()
             } else {
                 self.view_search()
             }
@@ -862,9 +888,18 @@ impl cosmic::Application for CosmicLauncher {
                     ..
                 }) => {
                     println!("DEBUG: Key released: {:?}", key);
-                    if matches!(key, Key::Named(Named::Alt) | Key::Named(Named::Super)) {
-                        println!("DEBUG: Alt/Super key released: {:?}", key);
-                        return Some(Message::AltRelease);
+                    match key {
+                        Key::Named(Named::Alt) => {
+                            // Alt released - send message to let app decide what to do
+                            println!("DEBUG: Alt key released");
+                            return Some(Message::AltRelease);
+                        }
+                        Key::Named(Named::Super) => {
+                            // Super released - send message to let app decide what to do
+                            println!("DEBUG: Super key released");
+                            return Some(Message::SuperRelease);
+                        }
+                        _ => {}
                     }
                     None
                 },
@@ -945,6 +980,66 @@ impl cosmic::Application for CosmicLauncher {
 }
 
 impl CosmicLauncher {
+    fn create_window_item_element<'a>(&self, item: &'a SearchResult, _idx: usize, is_selected: bool) -> Element<'a, Message> {
+        // Try to find screenshot for this window
+        let screenshot = self.find_screenshot_for_item(item);
+        
+        // Create preview image or fallback icon - fixed size and centered
+        let preview_element = if let Some(wayland_image) = screenshot {
+            // Use actual window screenshot as preview
+            let handle = Handle::from_rgba(
+                wayland_image.width,
+                wayland_image.height,
+                wayland_image.img.clone()
+            );
+            container(
+                Image::new(handle)
+                    .width(Length::Fixed(100.0))
+                    .height(Length::Fixed(75.0))
+            )
+            .width(Length::Fixed(100.0))
+            .height(Length::Fixed(75.0))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+        } else {
+            // Fallback to emoji icon if no screenshot available
+            container(
+                text(if is_selected { "▶️" } else { "🪟" })
+                    .size(32)
+            )
+            .width(Length::Fixed(100.0))
+            .height(Length::Fixed(75.0))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+        };
+
+        // Create consistent window item with same styling across modes
+        container(
+            row![
+                // Preview image or icon - fixed size and centered
+                preview_element,
+                // Only show description text (second line) with consistent size
+                container(
+                    text(&item.description)
+                        .size(if is_selected { 16 } else { 14 })
+                )
+                .width(Length::Fill)
+                .center_y(Length::Fill)
+            ]
+            .spacing(15)
+            .align_y(Alignment::Center)
+        )
+        .padding(if is_selected { 12 } else { 8 })
+        .width(Length::Fixed(520.0))
+        .height(Length::Fixed(90.0))
+        .class(if is_selected {
+            cosmic::theme::Container::Primary // Use primary highlight for selected
+        } else {
+            cosmic::theme::Container::Card
+        })
+        .into()
+    }
+
     fn view_search(&self) -> Element<Message> {
         // Original search UI code - simplified for now
         container(
@@ -988,68 +1083,12 @@ impl CosmicLauncher {
         } else {
             let mut windows_column = column![].spacing(8);
             
-                            for (idx, item) in self.launcher_items.iter().enumerate() {
+            for (idx, item) in self.launcher_items.iter().enumerate() {
                 let is_selected = self.active == Some(idx);
                 println!("DEBUG: Rendering item {} - '{}', selected: {}", idx, item.name, is_selected);
                 
-                // Try to find screenshot for this window
-                let screenshot = self.find_screenshot_for_item(item);
-                
-                // Create preview image or fallback icon
-                let preview_element = if let Some(wayland_image) = screenshot {
-                    // Use actual window screenshot as preview
-                    let handle = Handle::from_rgba(
-                        wayland_image.width,
-                        wayland_image.height,
-                        wayland_image.img.clone()
-                    );
-                    container(
-                        Image::new(handle)
-                            .width(Length::Fixed(if is_selected { 120.0 } else { 80.0 }))
-                            .height(Length::Fixed(if is_selected { 90.0 } else { 60.0 }))
-                    )
-                    .width(Length::Fixed(if is_selected { 120.0 } else { 80.0 }))
-                    .height(Length::Fixed(if is_selected { 90.0 } else { 60.0 }))
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill)
-                } else {
-                    // Fallback to emoji icon if no screenshot available
-                    container(
-                        text(if is_selected { "▶️" } else { "🪟" })
-                            .size(if is_selected { 40 } else { 32 })
-                    )
-                    .width(Length::Fixed(if is_selected { 120.0 } else { 80.0 }))
-                    .height(Length::Fixed(if is_selected { 90.0 } else { 60.0 }))
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill)
-                };
-
-                // Make selected window much more obvious
-                let window_item = container(
-                    row![
-                        // Preview image or icon
-                        preview_element,
-                        // Window title and info with enhanced styling for selected
-                        column![
-                            text(&item.name)
-                                .size(if is_selected { 20 } else { 16 }),
-                            text(&item.description)
-                                .size(if is_selected { 14 } else { 12 })
-                        ]
-                        .spacing(4)
-                    ]
-                    .spacing(15)
-                    .align_y(Alignment::Center)
-                )
-                .padding(if is_selected { 12 } else { 8 })
-                .width(Length::Fixed(if is_selected { 600.0 } else { 520.0 }))
-                .height(Length::Fixed(if is_selected { 110.0 } else { 80.0 }))
-                .class(if is_selected {
-                    cosmic::theme::Container::Primary // Use primary highlight for selected
-                } else {
-                    cosmic::theme::Container::Card
-                });
-                
+                // Use reusable window item element
+                let window_item = self.create_window_item_element(item, idx, is_selected);
                 windows_column = windows_column.push(window_item);
             }
             
@@ -1058,6 +1097,49 @@ impl CosmicLauncher {
         }
 
         // Single container wrapper
+        container(content)
+            .width(Length::Fill)
+            .center_x(Length::Fill)
+            .padding(20)
+            .into()
+    }
+
+    fn view_super_launcher(&self) -> Element<Message> {
+        let mut content = column![]
+            .spacing(15)
+            .align_x(Alignment::Center);
+
+        // Search field at the top
+        content = content.push(
+            column![
+                text("Launcher").size(24),
+                text_input::search_input(fl!("type-to-search"), &self.input_value)
+                    .on_input(Message::InputChanged)
+                    .width(500)
+                    .id(INPUT_ID.clone())
+            ]
+            .spacing(8)
+            .align_x(Alignment::Center)
+        );
+
+        // Window list below search - reuse Alt+Tab styling for consistency
+        if self.launcher_items.is_empty() {
+            content = content.push(text("No windows open").size(16));
+        } else {
+            let mut windows_column = column![].spacing(8);
+            
+            for (idx, item) in self.launcher_items.iter().enumerate() {
+                let is_selected = self.active == Some(idx);
+                println!("DEBUG: Super launcher rendering item {} - '{}', selected: {}", idx, item.name, is_selected);
+                
+                // Use the same reusable window item element for consistency
+                let window_item = self.create_window_item_element(item, idx, is_selected);
+                windows_column = windows_column.push(window_item);
+            }
+            
+            content = content.push(windows_column);
+        }
+
         container(content)
             .width(Length::Fill)
             .center_x(Length::Fill)
