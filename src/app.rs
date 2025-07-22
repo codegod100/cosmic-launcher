@@ -46,7 +46,7 @@ use cosmic::widget::{
 use cosmic::{Element, keyboard_nav};
 use cosmic::{iced_runtime, surface};
 use iced::keyboard::Key;
-use iced::{Alignment, Color};
+use iced::{Alignment};
 use pop_launcher::{ContextOption, GpuPreference, IconSource, SearchResult};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
@@ -980,7 +980,7 @@ impl cosmic::Application for CosmicLauncher {
 }
 
 impl CosmicLauncher {
-    fn create_window_item_element<'a>(&self, item: &'a SearchResult, _idx: usize, is_selected: bool) -> Element<'a, Message> {
+    fn create_window_item_element<'a>(&self, item: &'a SearchResult, idx: usize, is_selected: bool) -> Element<'a, Message> {
         // Try to find screenshot for this window
         let screenshot = self.find_screenshot_for_item(item);
         
@@ -1013,51 +1013,114 @@ impl CosmicLauncher {
             .center_y(Length::Fill)
         };
 
-        // Create consistent window item with same styling across modes
-        container(
-            row![
-                // Preview image or icon - fixed size and centered
-                preview_element,
-                // Only show description text (second line) with consistent size
-                container(
-                    text(&item.description)
-                        .size(if is_selected { 16 } else { 14 })
-                )
-                .width(Length::Fill)
-                .center_y(Length::Fill)
-            ]
-            .spacing(15)
-            .align_y(Alignment::Center)
+        // Create consistent window item with same styling across modes, but make it clickable
+        let content = row![
+            // Preview image or icon - fixed size and centered
+            preview_element,
+            // Only show description text (second line) with consistent size and color for selection
+            container(
+                if is_selected {
+                    text(&item.description).size(14).class(cosmic::theme::Text::Accent)
+                } else {
+                    text(&item.description).size(14)
+                }
+            )
+            .width(Length::Fill)
+            .center_y(Length::Fill)
+        ]
+        .spacing(15)
+        .align_y(Alignment::Center);
+
+        // Wrap in mouse_area for click functionality and enhanced styling for selection
+        mouse_area(
+            container(content)
+                .padding(12) // Consistent padding - no size changes
+                .width(Length::Fixed(520.0))
+                .height(Length::Fixed(90.0))
+                .class(if is_selected {
+                    cosmic::theme::Container::Primary // Use primary highlight for selection
+                } else {
+                    cosmic::theme::Container::Card
+                })
         )
-        .padding(if is_selected { 12 } else { 8 })
-        .width(Length::Fixed(520.0))
-        .height(Length::Fixed(90.0))
-        .class(if is_selected {
-            cosmic::theme::Container::Primary // Use primary highlight for selected
-        } else {
-            cosmic::theme::Container::Card
-        })
+        .on_press(Message::Activate(Some(idx)))
         .into()
     }
 
     fn view_search(&self) -> Element<Message> {
-        // Original search UI code - simplified for now
-        container(
-            column![
-                text("Search Mode").size(20),
-                text_input::search_input(fl!("type-to-search"), &self.input_value)
-                    .on_input(Message::InputChanged)
-                    .width(400)
-                    .id(INPUT_ID.clone())
-            ]
-            .spacing(10)
-            .align_x(Alignment::Center)
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .into()
+        // Search UI with clickable items
+        let mut content = column![]
+            .spacing(15)
+            .align_x(Alignment::Center);
+
+        // Search field at the top with background
+        content = content.push(
+            container(
+                column![
+                    text("Search Mode").size(20),
+                    text_input::search_input(fl!("type-to-search"), &self.input_value)
+                        .on_input(Message::InputChanged)
+                        .width(400)
+                        .id(INPUT_ID.clone())
+                ]
+                .spacing(10)
+                .align_x(Alignment::Center)
+            )
+            .padding(20)
+            .class(cosmic::theme::Container::Card) // Add background card styling
+        );
+
+        // Show search results if any - use same field as alt-tab (description)
+        if !self.launcher_items.is_empty() {
+            let mut results_column = column![].spacing(6);
+            
+            for (idx, item) in self.launcher_items.iter().enumerate() {
+                let is_focused = self.focused == idx;
+                
+                // Create clickable search result item using description field like alt-tab
+                let result_item = mouse_area(
+                    container(
+                        row![
+                            // Icon placeholder or small preview
+                            container(
+                                text(if item.window.is_some() { "🪟" } else { "📱" })
+                                    .size(20)
+                            )
+                            .width(Length::Fixed(40.0))
+                            .center_x(Length::Fill)
+                            .center_y(Length::Fill),
+                            // Use description field like alt-tab window list with color for selection
+                            if is_focused {
+                                text(&item.description).size(14).class(cosmic::theme::Text::Accent)
+                            } else {
+                                text(&item.description).size(14)
+                            }
+                        ]
+                        .spacing(12)
+                        .align_y(Alignment::Center)
+                    )
+                    .padding(10) // Consistent padding - no size changes
+                    .width(Length::Fixed(450.0))
+                    .class(if is_focused {
+                        cosmic::theme::Container::Primary
+                    } else {
+                        cosmic::theme::Container::Card
+                    })
+                )
+                .on_press(Message::Activate(Some(idx)));
+                
+                results_column = results_column.push(result_item);
+            }
+            
+            content = content.push(results_column);
+        }
+
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into()
     }
 
     fn view_alt_tab(&self) -> Element<Message> {
@@ -1096,11 +1159,11 @@ impl CosmicLauncher {
             content = content.push(windows_column);
         }
 
-        // Single container wrapper
+        // Single container wrapper with top margin to move away from screen edge
         container(content)
             .width(Length::Fill)
             .center_x(Length::Fill)
-            .padding(20)
+            .padding([80, 20, 20, 20]) // top, right, bottom, left - moved down from top
             .into()
     }
 
@@ -1109,17 +1172,21 @@ impl CosmicLauncher {
             .spacing(15)
             .align_x(Alignment::Center);
 
-        // Search field at the top
+        // Search field at the top with background
         content = content.push(
-            column![
-                text("Launcher").size(24),
-                text_input::search_input(fl!("type-to-search"), &self.input_value)
-                    .on_input(Message::InputChanged)
-                    .width(500)
-                    .id(INPUT_ID.clone())
-            ]
-            .spacing(8)
-            .align_x(Alignment::Center)
+            container(
+                column![
+                    text("Launcher").size(24),
+                    text_input::search_input(fl!("type-to-search"), &self.input_value)
+                        .on_input(Message::InputChanged)
+                        .width(500)
+                        .id(INPUT_ID.clone())
+                ]
+                .spacing(8)
+                .align_x(Alignment::Center)
+            )
+            .padding(20)
+            .class(cosmic::theme::Container::Card) // Add background card styling
         );
 
         // Window list below search - reuse Alt+Tab styling for consistency
@@ -1143,7 +1210,7 @@ impl CosmicLauncher {
         container(content)
             .width(Length::Fill)
             .center_x(Length::Fill)
-            .padding(20)
+            .padding([80, 20, 20, 20]) // top, right, bottom, left - moved down from top
             .into()
     }
 }
