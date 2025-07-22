@@ -18,7 +18,6 @@ use cosmic::iced::platform_specific::shell::commands::{
     self,
     activation::request_token,
     layer_surface::{Anchor, KeyboardInteractivity, destroy_layer_surface, get_layer_surface},
-    overlap_notify,
 };
 use cosmic::iced::widget::{column, container, image::{Handle, Image}};
 use cosmic::iced::{self, Length, Size, Subscription};
@@ -29,9 +28,6 @@ use cosmic::iced_runtime::core::event::wayland::LayerEvent;
 use cosmic::iced_runtime::core::event::{PlatformSpecific, wayland};
 use cosmic::iced_runtime::core::layout::Limits;
 use cosmic::iced_runtime::core::window::{Event as WindowEvent, Id as SurfaceId};
-use cosmic::iced_runtime::platform_specific::wayland::{
-    layer_surface::IcedMargin,
-};
 use cosmic::iced_widget::row;
 use cosmic::iced_widget::scrollable::RelativeOffset;
 use cosmic::iced_winit::commands::overlap_notify::overlap_notify;
@@ -51,7 +47,6 @@ use std::fmt::Display;
 use std::sync::LazyLock;
 use std::{
     collections::{HashMap, VecDeque},
-    rc::Rc,
     str::FromStr,
     time::{Duration, Instant},
 };
@@ -449,34 +444,37 @@ impl cosmic::Application for CosmicLauncher {
                 // Always update input value immediately for responsive UI
                 self.input_value.clone_from(&value);
                 
-                // Set debounce timer for search in super launcher mode
-                if self.super_launcher_mode {
-                    self.search_debounce_timer = Some(Instant::now());
-                    return Task::perform(
-                        async move {
-                            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                            value
-                        },
-                        |search_term| cosmic::Action::App(Message::DebouncedSearch(search_term)),
-                    );
-                }
+                // Use minimal debounce for responsive search
+                // For short queries (1-2 chars), search immediately
+                // For longer queries, use minimal debounce to avoid excessive requests
+                let debounce_ms = if value.len() <= 2 { 50 } else { 100 };
+                
+                self.search_debounce_timer = Some(Instant::now());
+                return Task::perform(
+                    async move {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(debounce_ms)).await;
+                        value
+                    },
+                    |search_term| cosmic::Action::App(Message::DebouncedSearch(search_term)),
+                );
             }
             Message::Backspace => {
                 // Always update input value immediately for responsive UI
                 self.input_value.pop();
                 
-                // Set debounce timer for search in super launcher mode
-                if self.super_launcher_mode {
-                    self.search_debounce_timer = Some(Instant::now());
-                    let value = self.input_value.clone();
-                    return Task::perform(
-                        async move {
-                            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                            value
-                        },
-                        |search_term| cosmic::Action::App(Message::DebouncedSearch(search_term)),
-                    );
-                }
+                // Use minimal debounce for responsive search
+                let input_len = self.input_value.len();
+                let debounce_ms = if input_len <= 2 { 50 } else { 100 };
+                
+                self.search_debounce_timer = Some(Instant::now());
+                let value = self.input_value.clone();
+                return Task::perform(
+                    async move {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(debounce_ms)).await;
+                        value
+                    },
+                    |search_term| cosmic::Action::App(Message::DebouncedSearch(search_term)),
+                );
             }
             Message::CompleteFocusedId(id) => {
                 // Handle both search activation and focus requests
@@ -500,6 +498,8 @@ impl cosmic::Application for CosmicLauncher {
                 
                 if let Some(item) = self.launcher_items.get(index) {
                     self.request(launcher::Request::Activate(item.id));
+                    // Hide immediately after activation for responsive UI
+                    return self.hide();
                 } else {
                     return self.hide();
                 }
@@ -774,33 +774,59 @@ impl cosmic::Application for CosmicLauncher {
             Message::DebouncedSearch(search_term) => {
                 // Only perform search if this is the most recent debounce timer
                 if let Some(timer) = self.search_debounce_timer {
-                    // Check if enough time has passed and input matches
-                    if timer.elapsed() >= Duration::from_millis(250) && search_term == self.input_value {
+                    // Reduced threshold from 250ms to 40ms for more responsiveness
+                    if timer.elapsed() >= Duration::from_millis(40) && search_term == self.input_value {
                         self.request(launcher::Request::Search(search_term));
                         self.search_debounce_timer = None;
                     }
                 }
             }
             Message::AltTab => {
-                // Cycle to next window in the list
-                if !self.launcher_items.is_empty() {
-                    let current = self.active.unwrap_or(0);
-                    let next = (current + 1) % self.launcher_items.len();
-                    self.active = Some(next);
-                    println!("DEBUG: AltTab - cycling from {} to {} (of {})", current, next, self.launcher_items.len());
+                // Handle subsequent Alt+Tab presses - only show UI if we're already visible or waiting to be shown
+                if self.surface_state == SurfaceState::Visible || self.surface_state == SurfaceState::WaitingToBeShown {
+                    if !self.launcher_items.is_empty() {
+                        let current = self.active.unwrap_or(0);
+                        let next = (current + 1) % self.launcher_items.len();
+                        self.active = Some(next);
+                        println!("DEBUG: AltTab UI - cycling from {} to {} (of {})", current, next, self.launcher_items.len());
+                        
+                        // Show the switcher UI for subsequent presses
+                        if self.surface_state == SurfaceState::WaitingToBeShown {
+                            return self.show();
+                        }
+                    } else {
+                        // No items yet, just set initial active state
+                        self.active = Some(0);
+                    }
+                } else {
+                    // UI is hidden - this Alt+Tab should be handled by dbus_activation for instant switching
+                    println!("DEBUG: Ignoring Alt+Tab message - surface is hidden, dbus_activation should handle this");
                 }
             }
             Message::ShiftAltTab => {
-                // Cycle to previous window in the list
-                if !self.launcher_items.is_empty() {
-                    let current = self.active.unwrap_or(0);
-                    let prev = if current == 0 {
-                        self.launcher_items.len() - 1
+                // Handle subsequent Shift+Alt+Tab presses - only show UI if we're already visible or waiting to be shown
+                if self.surface_state == SurfaceState::Visible || self.surface_state == SurfaceState::WaitingToBeShown {
+                    if !self.launcher_items.is_empty() {
+                        let current = self.active.unwrap_or(0);
+                        let prev = if current == 0 {
+                            self.launcher_items.len() - 1
+                        } else {
+                            current - 1
+                        };
+                        self.active = Some(prev);
+                        println!("DEBUG: ShiftAltTab UI - cycling from {} to {} (of {})", current, prev, self.launcher_items.len());
+                        
+                        // Show the switcher UI for subsequent presses
+                        if self.surface_state == SurfaceState::WaitingToBeShown {
+                            return self.show();
+                        }
                     } else {
-                        current - 1
-                    };
-                    self.active = Some(prev);
-                    println!("DEBUG: ShiftAltTab - cycling from {} to {} (of {})", current, prev, self.launcher_items.len());
+                        // No items yet, just set initial active state
+                        self.active = Some(0);
+                    }
+                } else {
+                    // UI is hidden - this Shift+Alt+Tab should be handled by dbus_activation for instant switching
+                    println!("DEBUG: Ignoring Shift+Alt+Tab message - surface is hidden, dbus_activation should handle this");
                 }
             }
             Message::AltRelease => {
@@ -876,21 +902,52 @@ impl cosmic::Application for CosmicLauncher {
                     LauncherTasks::AltTab => {
                         // Enable Alt+Tab mode
                         self.alt_tab_mode = true;
-                        // Set initial selection for Alt+Tab mode
-                        if self.active.is_none() && !self.launcher_items.is_empty() {
+                        
+                        // If we have items, immediately switch to next window without showing UI
+                        if !self.launcher_items.is_empty() {
+                            let current = self.active.unwrap_or(0);
+                            let next = (current + 1) % self.launcher_items.len();
+                            self.active = Some(next);
+                            println!("DEBUG: AltTab - immediately switching to window {} (of {})", next, self.launcher_items.len());
+                            
+                            // Immediately activate the next window without showing UI
+                            if let Some(item) = self.launcher_items.get(next) {
+                                self.request(launcher::Request::Activate(item.id));
+                                // Reset state and return without showing UI
+                                self.surface_state = SurfaceState::Hidden;
+                                return Task::none(); // Don't show UI for instant switch
+                            }
+                        } else {
+                            // If no items, set up for when they arrive
                             self.active = Some(0);
                         }
-                        return self.update(Message::AltTab);
                     }
                     LauncherTasks::ShiftAltTab => {
-                        // Enable Alt+Tab mode
+                        // Enable Alt+Tab mode  
                         self.alt_tab_mode = true;
-                        // Set initial selection for Shift+Alt+Tab mode
-                        if self.active.is_none() && !self.launcher_items.is_empty() {
-                            // Start with second window for reverse cycling
-                            self.active = Some(if self.launcher_items.len() > 1 { 1 } else { 0 });
+                        
+                        // If we have items, immediately switch to previous window without showing UI
+                        if !self.launcher_items.is_empty() {
+                            let current = self.active.unwrap_or(0);
+                            let prev = if current == 0 {
+                                self.launcher_items.len() - 1
+                            } else {
+                                current - 1
+                            };
+                            self.active = Some(prev);
+                            println!("DEBUG: ShiftAltTab - immediately switching to window {} (of {})", prev, self.launcher_items.len());
+                            
+                            // Immediately activate the previous window without showing UI
+                            if let Some(item) = self.launcher_items.get(prev) {
+                                self.request(launcher::Request::Activate(item.id));
+                                // Reset state and return without showing UI
+                                self.surface_state = SurfaceState::Hidden;
+                                return Task::none(); // Don't show UI for instant switch
+                            }
+                        } else {
+                            // If no items, set up for when they arrive
+                            self.active = Some(0);
                         }
-                        return self.update(Message::ShiftAltTab);
                     }
                 }
             }
@@ -915,10 +972,10 @@ impl cosmic::Application for CosmicLauncher {
             }
             // Show appropriate view based on mode
             if self.alt_tab_mode {
+                // Alt+Tab mode: Window switching with thumbnails
                 self.view_alt_tab()
-            } else if self.super_launcher_mode {
-                self.view_super_launcher()
             } else {
+                // Default launcher mode: App search and browsing
                 self.view_search()
             }
         } else {
@@ -964,20 +1021,20 @@ impl cosmic::Application for CosmicLauncher {
                     // Debug: Log ALL key presses to understand what's happening
                     println!("DEBUG: Key pressed: {:?}, modifiers: alt={}, shift={}, ctrl={}", key, modifiers.alt(), modifiers.shift(), modifiers.control());
                     
-                    // Handle Alt+Tab and Shift+Alt+Tab explicitly
+                    // Handle Alt+Tab and Shift+Alt+Tab explicitly - but only when UI is visible
                     if let Key::Named(Named::Tab) = key {
                         println!("DEBUG: Raw Tab event: alt={}, shift={}", modifiers.alt(), modifiers.shift());
-                        // Raw keyboard events for Tab
+                        // Only handle Tab navigation when launcher UI might be visible
+                        // We can't access self.surface_state here, so we'll handle this in the message update
                         if modifiers.alt() && modifiers.shift() {
                             println!("DEBUG: Raw Shift+Alt+Tab");
                             return Some(Message::ShiftAltTab);
                         } else if modifiers.alt() {
                             println!("DEBUG: Raw Alt+Tab");
                             return Some(Message::AltTab);
-                        } else {
-                            println!("DEBUG: Raw Tab - focusing next");
-                            return Some(Message::KeyboardNav(keyboard_nav::Action::FocusNext));
                         }
+                        println!("DEBUG: Raw Tab - focusing next");
+                        return Some(Message::KeyboardNav(keyboard_nav::Action::FocusNext));
                     }
                     // Handle number activation
                     if let Key::Character(c) = key.clone() {
@@ -1326,109 +1383,6 @@ impl CosmicLauncher {
     }
 
     fn view_search(&self) -> Element<Message> {
-        // Search UI with clickable items
-        let mut content = column![]
-            .spacing(15)
-            .align_x(Alignment::Center);
-
-        // Search field at the top with background
-        content = content.push(
-            container(
-                column![
-                    text("Search Mode").size(20),
-                    text_input::search_input(fl!("type-to-search"), &self.input_value)
-                        .on_input(Message::InputChanged)
-                        .width(600) // Increased width
-                        .id(INPUT_ID.clone())
-                ]
-                .spacing(10)
-                .align_x(Alignment::Center)
-            )
-            .padding(20)
-            .class(cosmic::theme::Container::Card) // Add background card styling
-        );
-
-        // Show search results if any - use same field as alt-tab (description) with proper icons
-        if !self.launcher_items.is_empty() {
-            let mut result_elements: Vec<Element<Message>> = Vec::new();
-            
-            for (idx, item) in self.launcher_items.iter().enumerate() {
-                let is_focused = self.focused == idx;
-                
-                // Use the specialized search item element that shows proper icons/previews
-                let result_item = self.create_search_item_element(item, idx, is_focused);
-                result_elements.push(result_item);
-            }
-            
-            // Create grid layout with 2 columns for search results in a wider container
-            let grid = self.create_grid_layout(result_elements, 2);
-            content = content.push(
-                container(grid)
-                    .width(Length::Fixed(1200.0)) // Wide container for grid - adjusted for smaller screenshots
-                    .padding(20)
-                    .class(cosmic::theme::Container::Card)
-            );
-        }
-
-        container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .into()
-    }
-
-    fn view_alt_tab(&self) -> Element<Message> {
-        let mut content = column![]
-            .spacing(10)
-            .align_x(Alignment::Center);
-
-        // Title
-        content = content.push(
-            text("Alt + Tab - Task Switcher")
-                .size(24)
-        );
-
-        // Instructions
-        content = content.push(
-            text("Use Tab to cycle through windows, release Alt to switch")
-                .size(14)
-        );
-
-        // List of launcher items (windows) in alt-tab mode
-        if self.launcher_items.is_empty() {
-            content = content.push(text("No windows open").size(16));
-        } else {
-            let mut window_elements: Vec<Element<Message>> = Vec::new();
-            
-            for (idx, item) in self.launcher_items.iter().enumerate() {
-                let is_selected = self.active == Some(idx);
-                println!("DEBUG: Rendering item {} - '{}', selected: {}", idx, item.name, is_selected);
-                
-                // Use reusable window item element
-                let window_item = self.create_window_item_element(item, idx, is_selected);
-                window_elements.push(window_item);
-            }
-            
-            // Create grid layout with 2 columns for window items in a wider container
-            let grid = self.create_grid_layout(window_elements, 2);
-            content = content.push(
-                container(grid)
-                    .width(Length::Fixed(1100.0)) // Wide container for window grid
-                    .padding(20)
-                    .class(cosmic::theme::Container::Card)
-            );
-        }
-
-        // Single container wrapper with top margin to move away from screen edge
-        container(content)
-            .width(Length::Fill)
-            .center_x(Length::Fill)
-            .padding([80, 20, 20, 20]) // top, right, bottom, left - moved down from top
-            .into()
-    }
-
-    fn view_super_launcher(&self) -> Element<Message> {
         let mut content = column![]
             .spacing(15)
             .align_x(Alignment::Center);
@@ -1458,7 +1412,7 @@ impl CosmicLauncher {
             
             for (idx, item) in self.launcher_items.iter().enumerate() {
                 let is_selected = self.active == Some(idx);
-                println!("DEBUG: Super launcher rendering item {} - '{}', selected: {}", idx, item.name, is_selected);
+                println!("DEBUG: Launcher rendering item {} - '{}', selected: {}", idx, item.name, is_selected);
                 
                 // Use search item elements when searching (input not empty) to show clean app names
                 // Use window item elements when browsing (input empty) to show window titles
@@ -1489,6 +1443,56 @@ impl CosmicLauncher {
             .width(Length::Fill)
             .center_x(Length::Fill)
             .padding([80, 20, 20, 20]) // top, right, bottom, left - moved down from top
+            .into()
+    }
+
+    fn view_alt_tab(&self) -> Element<Message> {
+        let mut content = column![]
+            .spacing(15)
+            .align_x(Alignment::Center);
+
+        // Title and instructions
+        content = content.push(
+            container(
+                column![
+                    text("Alt + Tab - Task Switcher").size(24),
+                    text("Use Tab to cycle through windows, release Alt to switch")
+                        .size(14)
+                        .class(cosmic::theme::Text::Default)
+                ]
+                .spacing(8)
+                .align_x(Alignment::Center)
+            )
+            .padding(20)
+            .class(cosmic::theme::Container::Card)
+        );
+
+        // Show window items
+        if self.launcher_items.is_empty() {
+            content = content.push(text("No windows open").size(16));
+        } else {
+            let mut item_elements: Vec<Element<Message>> = Vec::new();
+            
+            for (idx, item) in self.launcher_items.iter().enumerate() {
+                let is_selected = self.active == Some(idx);
+                let window_element = self.create_window_item_element(item, idx, is_selected);
+                item_elements.push(window_element);
+            }
+            
+            // Create grid layout with 2 columns
+            let grid = self.create_grid_layout(item_elements, 2);
+            content = content.push(
+                container(grid)
+                    .width(Length::Fixed(1300.0))
+                    .padding(20)
+                    .class(cosmic::theme::Container::Card)
+            );
+        }
+
+        container(content)
+            .width(Length::Fill)
+            .center_x(Length::Fill)
+            .padding([80, 20, 20, 20])
             .into()
     }
 }
