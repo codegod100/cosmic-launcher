@@ -227,8 +227,8 @@ impl CosmicLauncher {
                 keyboard_interactivity: KeyboardInteractivity::Exclusive,
                 anchor: Anchor::TOP,
                 namespace: "launcher".into(),
-                size: Some((Some(1200), Some(1600))), // Increased width from 600 to 1200
-                size_limits: Limits::NONE.min_width(1200.0).min_height(1600.0).max_width(1200.0).max_height(1600.0),
+                size: Some((Some(1400), Some(1600))), // Adjusted width for smaller screenshots
+                size_limits: Limits::NONE.min_width(1400.0).min_height(1600.0).max_width(1400.0).max_height(1600.0),
                 exclusive_zone: -1,
                 ..Default::default()
             }),
@@ -1095,12 +1095,12 @@ impl CosmicLauncher {
                 }
             };
             
-            // Show screenshot with small app icon overlay
+            // Show screenshot with small app icon overlay - rectangular aspect ratio
             container(
                 row![
                     Image::new(handle)
-                        .width(Length::Fixed(32.0))
-                        .height(Length::Fixed(24.0))
+                        .width(Length::Fixed(70.0))
+                        .height(Length::Fixed(40.0))
                         .content_fit(cosmic::iced::ContentFit::Fill),
                     container(app_icon)
                         .width(Length::Fixed(20.0))
@@ -1111,8 +1111,8 @@ impl CosmicLauncher {
                 .spacing(4)
                 .align_y(Alignment::Center)
             )
-            .width(Length::Fixed(60.0))
-            .height(Length::Fixed(30.0))
+            .width(Length::Fixed(110.0))
+            .height(Length::Fixed(50.0))
             .center_x(Length::Fill)
             .center_y(Length::Fill)
         } else {
@@ -1201,14 +1201,14 @@ impl CosmicLauncher {
                             }
                         ]
                         .spacing(2)
-                        .width(Length::Fixed(360.0)) // Adjusted width to account for wider icon area
+                        .width(Length::Fixed(380.0)) // Adjusted width for smaller rectangular screenshot area
                     }
                 ]
                 .spacing(12)
                 .align_y(Alignment::Center)
             )
             .padding(12) // Consistent padding with window items
-            .width(Length::Fixed(450.0))
+            .width(Length::Fixed(520.0))
             .class(if is_focused {
                 cosmic::theme::Container::Primary
             } else {
@@ -1248,8 +1248,8 @@ impl CosmicLauncher {
             container(
                 column![
                     Image::new(handle)
-                        .width(Length::Fixed(100.0))
-                        .height(Length::Fixed(75.0))
+                        .width(Length::Fixed(220.0))
+                        .height(Length::Fixed(125.0))
                         .content_fit(cosmic::iced::ContentFit::Fill),
                     container(app_icon)
                         .width(Length::Fixed(24.0))
@@ -1260,8 +1260,8 @@ impl CosmicLauncher {
                 .spacing(4)
                 .align_x(Alignment::Center)
             )
-            .width(Length::Fixed(100.0))
-            .height(Length::Fixed(105.0)) // Increased height to accommodate app icon
+            .width(Length::Fixed(220.0))
+            .height(Length::Fixed(155.0)) // Height to accommodate app icon below
             .center_x(Length::Fill)
             .center_y(Length::Fill)
         } else {
@@ -1272,8 +1272,8 @@ impl CosmicLauncher {
                         icon::from_name(icon_name.clone())
                             .size(40)
                     )
-                    .width(Length::Fixed(100.0))
-                    .height(Length::Fixed(75.0))
+                    .width(Length::Fixed(220.0))
+                    .height(Length::Fixed(125.0))
                     .center_x(Length::Fill)
                     .center_y(Length::Fill)
                 }
@@ -1283,8 +1283,8 @@ impl CosmicLauncher {
                         text(if is_selected { "▶️" } else { "🪟" })
                             .size(32)
                     )
-                    .width(Length::Fixed(100.0))
-                    .height(Length::Fixed(75.0))
+                    .width(Length::Fixed(220.0))
+                    .height(Length::Fixed(125.0))
                     .center_x(Length::Fill)
                     .center_y(Length::Fill)
                 }
@@ -1313,8 +1313,8 @@ impl CosmicLauncher {
         mouse_area(
             container(content)
                 .padding(12) // Consistent padding - no size changes
-                .width(Length::Fixed(520.0))
-                .height(Length::Fixed(120.0)) // Increased height to accommodate app icon below screenshot
+                .width(Length::Fixed(600.0))
+                .height(Length::Fixed(180.0)) // Reduced to accommodate smaller screenshots
                 .class(if is_selected {
                     cosmic::theme::Container::Primary // Use primary highlight for selection
                 } else {
@@ -1364,7 +1364,7 @@ impl CosmicLauncher {
             let grid = self.create_grid_layout(result_elements, 2);
             content = content.push(
                 container(grid)
-                    .width(Length::Fixed(1000.0)) // Wide container for grid
+                    .width(Length::Fixed(1200.0)) // Wide container for grid - adjusted for smaller screenshots
                     .padding(20)
                     .class(cosmic::theme::Container::Card)
             );
@@ -1478,7 +1478,7 @@ impl CosmicLauncher {
             content = content.push(
                 container(grid)
                     .width(Length::Fixed(
-                        if self.input_value.trim().is_empty() { 1100.0 } else { 1000.0 }
+                        if self.input_value.trim().is_empty() { 1300.0 } else { 1200.0 }
                     )) // Adjust width based on content type
                     .padding(20)
                     .class(cosmic::theme::Container::Card)
