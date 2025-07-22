@@ -158,7 +158,7 @@ pub struct CosmicLauncher {
     cursor_position: Option<Point<f32>>,
     focused: usize,
     last_hide: Instant,
-    // alt_tab: bool, // removed, no longer needed
+    alt_tab_mode: bool, // Track if we're in Alt+Tab mode
     window_id: window::Id,
     queue: VecDeque<Message>,
     result_ids: Vec<Id>,
@@ -239,6 +239,7 @@ impl CosmicLauncher {
         self.input_value.clear();
         self.focused = 0;
         self.active = None;
+        self.alt_tab_mode = false; // Reset Alt+Tab mode
         self.queue.clear();
 
         self.request(launcher::Request::Close);
@@ -397,6 +398,7 @@ impl cosmic::Application for CosmicLauncher {
                 cursor_position: None,
                 focused: 0,
                 last_hide: Instant::now(),
+                alt_tab_mode: false,
                 window_id: window::Id::unique(),
                 queue: VecDeque::new(),
                 result_ids: (0..10)
@@ -589,7 +591,7 @@ impl cosmic::Application for CosmicLauncher {
                         }
 
                         // Update screenshots for alt-tab mode and set active window
-                        if !self.launcher_items.is_empty() {
+                        if !self.launcher_items.is_empty() && self.alt_tab_mode {
                             // Set initial active window for alt-tab mode
                             if let Some(current_active) = self.active {
                                 // Adjust the active index if it's beyond the list size
@@ -598,8 +600,8 @@ impl cosmic::Application for CosmicLauncher {
                                     self.active = Some(0);
                                     println!("DEBUG: Adjusted Alt+Tab selection to window 0 (only {} items)", self.launcher_items.len());
                                 }
-                            } else if !self.launcher_items.is_empty() {
-                                // Default to first window if no active selection
+                            } else {
+                                // Default to first window if no active selection in Alt+Tab mode
                                 self.active = Some(0);
                                 println!("DEBUG: Setting initial Alt+Tab selection to window 0");
                             }
@@ -784,13 +786,29 @@ impl cosmic::Application for CosmicLauncher {
 
                 if self.surface_state == SurfaceState::Hidden {
                     self.surface_state = SurfaceState::WaitingToBeShown;
+                    // For Alt+Tab, we need to populate the launcher with windows
+                    // Send an empty search to get the window list
+                    self.request(launcher::Request::Search(String::new()));
                 }
 
                 match cmd {
                     LauncherTasks::AltTab => {
+                        // Enable Alt+Tab mode
+                        self.alt_tab_mode = true;
+                        // Set initial selection for Alt+Tab mode
+                        if self.active.is_none() && !self.launcher_items.is_empty() {
+                            self.active = Some(0);
+                        }
                         return self.update(Message::AltTab);
                     }
                     LauncherTasks::ShiftAltTab => {
+                        // Enable Alt+Tab mode
+                        self.alt_tab_mode = true;
+                        // Set initial selection for Shift+Alt+Tab mode
+                        if self.active.is_none() && !self.launcher_items.is_empty() {
+                            // Start with second window for reverse cycling
+                            self.active = Some(if self.launcher_items.len() > 1 { 1 } else { 0 });
+                        }
                         return self.update(Message::ShiftAltTab);
                     }
                 }
@@ -814,8 +832,12 @@ impl cosmic::Application for CosmicLauncher {
                     .height(Length::Fixed(100.0))
                     .into();
             }
-            // Always show the search view (or you can always show alt_tab view if you prefer)
-            self.view_search()
+            // Show alt-tab view when in alt-tab mode, otherwise show search view
+            if self.alt_tab_mode {
+                self.view_alt_tab()
+            } else {
+                self.view_search()
+            }
         } else {
             container(text(""))
                 .width(Length::Fixed(1.0))
@@ -970,15 +992,43 @@ impl CosmicLauncher {
                 let is_selected = self.active == Some(idx);
                 println!("DEBUG: Rendering item {} - '{}', selected: {}", idx, item.name, is_selected);
                 
+                // Try to find screenshot for this window
+                let screenshot = self.find_screenshot_for_item(item);
+                
+                // Create preview image or fallback icon
+                let preview_element = if let Some(wayland_image) = screenshot {
+                    // Use actual window screenshot as preview
+                    let handle = Handle::from_rgba(
+                        wayland_image.width,
+                        wayland_image.height,
+                        wayland_image.img.clone()
+                    );
+                    container(
+                        Image::new(handle)
+                            .width(Length::Fixed(if is_selected { 120.0 } else { 80.0 }))
+                            .height(Length::Fixed(if is_selected { 90.0 } else { 60.0 }))
+                    )
+                    .width(Length::Fixed(if is_selected { 120.0 } else { 80.0 }))
+                    .height(Length::Fixed(if is_selected { 90.0 } else { 60.0 }))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                } else {
+                    // Fallback to emoji icon if no screenshot available
+                    container(
+                        text(if is_selected { "▶️" } else { "🪟" })
+                            .size(if is_selected { 40 } else { 32 })
+                    )
+                    .width(Length::Fixed(if is_selected { 120.0 } else { 80.0 }))
+                    .height(Length::Fixed(if is_selected { 90.0 } else { 60.0 }))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                };
+
                 // Make selected window much more obvious
                 let window_item = container(
                     row![
-                        // Icon with different styling for selected
-                        container(text(if is_selected { "▶️" } else { "🪟" }).size(if is_selected { 40 } else { 32 }))
-                            .width(Length::Fixed(60.0))
-                            .height(Length::Fixed(40.0))
-                            .center_x(Length::Fill)
-                            .center_y(Length::Fill),
+                        // Preview image or icon
+                        preview_element,
                         // Window title and info with enhanced styling for selected
                         column![
                             text(&item.name)
@@ -988,12 +1038,12 @@ impl CosmicLauncher {
                         ]
                         .spacing(4)
                     ]
-                    .spacing(10)
+                    .spacing(15)
                     .align_y(Alignment::Center)
                 )
                 .padding(if is_selected { 12 } else { 8 })
-                .width(Length::Fixed(480.0))
-                .height(Length::Fixed(if is_selected { 70.0 } else { 60.0 }))
+                .width(Length::Fixed(if is_selected { 600.0 } else { 520.0 }))
+                .height(Length::Fixed(if is_selected { 110.0 } else { 80.0 }))
                 .class(if is_selected {
                     cosmic::theme::Container::Primary // Use primary highlight for selected
                 } else {
