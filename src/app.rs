@@ -4,10 +4,10 @@ use cosmic::cctk::toplevel_info::ToplevelInfo;
 use cosmic::cctk::wayland_protocols::ext::foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1;
 use clap::Parser;
 use cosmic::app::{Core, CosmicFlags, Settings, Task};
-use cosmic::cctk::sctk;
 use cosmic::dbus_activation::Details;
+use cosmic::cctk::sctk;
 use cosmic::iced::alignment::Alignment;
-use cosmic::iced::event::Status;
+
 use cosmic::iced::event::wayland::OverlapNotifyEvent;
 use cosmic::iced::id::Id;
 use cosmic::iced::platform_specific::runtime::wayland::{
@@ -142,6 +142,7 @@ pub struct CosmicLauncher {
     search_debounce_timer: Option<Instant>, // Timer for debounced search
 
     toplevel_captures: HashMap<ExtForeignToplevelHandleV1, WaylandImage>,
+    screenshot_cache_time: HashMap<ExtForeignToplevelHandleV1, Instant>,
     toplevels: Vec<ToplevelInfo>,
     active: Option<usize>, // For Alt+Tab selected window index
     #[allow(dead_code)]
@@ -172,6 +173,45 @@ pub enum Message {
 }
 
 impl CosmicLauncher {
+    fn set_mode(&mut self, alt_tab: bool, super_launcher: bool) {
+        if alt_tab && super_launcher {
+            panic!("Cannot have both alt_tab_mode and super_launcher_mode active simultaneously");
+        }
+        println!("DEBUG: Mode set - alt_tab: {}, super_launcher: {} (previous: alt_tab={}, super={})", 
+                 alt_tab, super_launcher, self.alt_tab_mode, self.super_launcher_mode);
+        self.alt_tab_mode = alt_tab;
+        self.super_launcher_mode = super_launcher;
+    }
+
+    fn is_screenshot_cache_fresh(&self, handle: &ExtForeignToplevelHandleV1) -> bool {
+        const CACHE_DURATION_MS: u128 = 2000; // Cache screenshots for 2 seconds
+        
+        if let Some(cache_time) = self.screenshot_cache_time.get(handle) {
+            let age = cache_time.elapsed().as_millis();
+            age < CACHE_DURATION_MS
+        } else {
+            false
+        }
+    }
+
+    fn populate_from_cached_toplevels(&mut self) {
+        // Immediately populate launcher_items from cached toplevels for Alt+Tab
+        println!("DEBUG: Populating {} toplevels from cache", self.toplevels.len());
+        
+        self.launcher_items = self.toplevels.iter().enumerate().map(|(idx, toplevel)| {
+            SearchResult {
+                id: idx as u32, // Use index as simple ID
+                name: if !toplevel.title.is_empty() { toplevel.title.clone() } else if !toplevel.app_id.is_empty() { toplevel.app_id.clone() } else { "Unknown".to_string() },
+                description: toplevel.app_id.clone(),
+                icon: None, // Will be determined in UI based on app_id
+                category_icon: None,
+                window: None, // We'll match screenshots by name/title instead
+            }
+        }).collect();
+        
+        println!("DEBUG: Populated {} launcher items from toplevels", self.launcher_items.len());
+    }
+
     fn request(&self, r: launcher::Request) {
         debug!("request: {:?}", r);
         if let Some(tx) = &self.tx {
@@ -215,13 +255,13 @@ impl CosmicLauncher {
         Task::batch(tasks)
     }
 
+
     fn hide(&mut self) -> Task<Message> {
         println!("DEBUG: hide() called - resetting state");
         self.input_value.clear();
         self.focused = 0;
         self.active = None;
-        self.alt_tab_mode = false; // Reset Alt+Tab mode
-        self.super_launcher_mode = false; // Reset Super launcher mode
+        self.set_mode(false, false); // Reset all modes
         self.search_debounce_timer = None; // Clear search debounce timer
         self.queue.clear();
 
@@ -230,7 +270,7 @@ impl CosmicLauncher {
         let mut tasks = Vec::new();
 
         if self.surface_state == SurfaceState::Visible {
-            println!("DEBUG: Destroying layer surface and hiding");
+            println!("DEBUG: Destroying layer surface");
             tasks.push(destroy_layer_surface(self.window_id));
             if self.menu.take().is_some() {
                 tasks.push(commands::popup::destroy_popup(*MENU_ID));
@@ -394,6 +434,7 @@ impl cosmic::Application for CosmicLauncher {
                 needs_clear: false,
 
                 toplevel_captures: HashMap::new(),
+                screenshot_cache_time: HashMap::new(),
                 toplevels: Vec::new(),
                 active: None,
                 backend_event_receiver: None,
@@ -460,82 +501,61 @@ impl cosmic::Application for CosmicLauncher {
                 let i = self
                     .result_ids
                     .iter()
-                    .position(|res_id| res_id == &id)
-                    .unwrap_or_default();
-
-                if let Some(id) = self.launcher_items.get(i).map(|res| res.id) {
-                    self.request(launcher::Request::Complete(id));
-                }
-            }
-            Message::Activate(i) => {
-                let index = i.unwrap_or(self.focused);
+                    .position(|res_id| res_id == &id);
                 
-                if let Some(item) = self.launcher_items.get(index) {
-                    self.request(launcher::Request::Activate(item.id));
-                    // Hide immediately after activation for responsive UI
-                    return self.hide();
-                }
-                return self.hide();
-            }
-            Message::CursorMoved(pos) => {
-                self.cursor_position = Some(pos);
-            }
-            Message::Opened(size, window_id) => {
-                if window_id == self.window_id {
-                    // Clamp height to reasonable bounds to prevent overflow
-                    self.height = size.height.clamp(1.0, 800.0);
-                    self.handle_overlap();
+                if let Some(i) = i {
+                    self.focused = i;
+                    return self.update(Message::Activate(Some(i)));
                 }
             }
-            Message::LauncherEvent(e) => match e {
-                launcher::Event::Started(tx) => {
-                    info!("Pop-launcher service started and connected");
-                    self.tx.replace(tx);
-                    info!("Sending initial search request to pop-launcher");
-                    self.request(launcher::Request::Search(self.input_value.clone()));
-                }
-                launcher::Event::ServiceIsClosed => {
-                    info!("Pop-launcher service closed");
-                    self.request(launcher::Request::ServiceIsClosed);
-                }
-                launcher::Event::Response(response) => match response {
-                    pop_launcher::Response::Close => {
+            Message::Activate(idx) => {
+                if let Some(idx) = idx {
+                    if let Some(item) = self.launcher_items.get(idx) {
+                        self.request(launcher::Request::Activate(item.id));
                         return self.hide();
                     }
-                    #[allow(clippy::cast_possible_truncation)]
+                }
+            }
+            Message::CursorMoved(point) => {
+                self.cursor_position = Some(point);
+            }
+            Message::LauncherEvent(event) => match event {
+                launcher::Event::Started(tx) => {
+                    self.tx = Some(tx);
+                }
+                launcher::Event::ServiceIsClosed => {
+                    // Handle service closure by clearing the transmitter
+                    self.tx = None;
+                }
+                launcher::Event::Response(res) => match res {
                     pop_launcher::Response::Context { id, options } => {
-                        if options.is_empty() {
-                            return Task::none();
-                        }
-
                         self.menu = Some((id, options));
-                        let Some(pos) = self.cursor_position.as_ref() else {
-                            return Task::none();
-                        };
-                        let rect = Rectangle {
-                            x: pos.x.round() as i32,
-                            y: pos.y.round() as i32,
-                            width: 1,
-                            height: 1,
-                        };
-                        return commands::popup::get_popup(SctkPopupSettings {
-                                    parent: self.window_id,
-                                    id: *MENU_ID,
-                                    positioner: SctkPositioner {
-                                        size: None,
-                                        size_limits: Limits::NONE.min_width(1.0).min_height(1.0).max_width(300.0).max_height(800.0),
-                                        anchor_rect: rect,
-                                        anchor:
-                                            sctk::reexports::protocols::xdg::shell::client::xdg_positioner::Anchor::Right,
-                                        gravity: sctk::reexports::protocols::xdg::shell::client::xdg_positioner::Gravity::Right,
-                                        reactive: true,
-                                        ..Default::default()
-                                    },
-                                    grab: true,
-                                    parent_size: None,
-                                    close_with_children: false,
-                                    input_zone: None,
-                                });
+                        if let Some(cursor_position) = self.cursor_position {
+                            let rect = Rectangle {
+                                x: cursor_position.x as i32,
+                                y: cursor_position.y as i32,
+                                width: 1,
+                                height: 1,
+                            };
+                            return commands::popup::get_popup(SctkPopupSettings {
+                                parent: self.window_id,
+                                id: *MENU_ID,
+                                positioner: SctkPositioner {
+                                    size: None,
+                                    size_limits: Limits::NONE.min_width(1.0).min_height(1.0).max_width(300.0).max_height(800.0),
+                                    anchor_rect: rect,
+                                    anchor:
+                                        sctk::reexports::protocols::xdg::shell::client::xdg_positioner::Anchor::Right,
+                                    gravity: sctk::reexports::protocols::xdg::shell::client::xdg_positioner::Gravity::Right,
+                                    reactive: true,
+                                    ..Default::default()
+                                },
+                                grab: true,
+                                parent_size: None,
+                                close_with_children: false,
+                                input_zone: None,
+                            });
+                        }
                     }
                     pop_launcher::Response::DesktopEntry {
                         path,
@@ -631,16 +651,25 @@ impl cosmic::Application for CosmicLauncher {
                         self.input_value = s;
                         self.request(launcher::Request::Search(self.input_value.clone()));
                     }
-                },
-            },
+                    pop_launcher::Response::Close => {
+                        // Handle launcher close request
+                        return self.hide();
+                    }
+                }
+            }
             Message::Layer(e) => match e {
                 LayerEvent::Focused | LayerEvent::Done => {
                     println!("DEBUG: Layer event: {:?}", e);
                 }
                 LayerEvent::Unfocused => {
-                    println!("DEBUG: Layer unfocused - hiding launcher");
-                    self.last_hide = Instant::now();
-                    return self.hide();
+                    // In Alt+Tab mode, don't hide on unfocus - wait for Alt release
+                    if self.alt_tab_mode {
+                        println!("DEBUG: Layer unfocused in Alt+Tab mode - staying visible");
+                    } else {
+                        println!("DEBUG: Layer unfocused - hiding launcher");
+                        self.last_hide = Instant::now();
+                        return self.hide();
+                    }
                 }
             },
             Message::Overlap(overlap_notify_event) => match overlap_notify_event {
@@ -712,73 +741,30 @@ impl cosmic::Application for CosmicLauncher {
                 });
             }
 
-            Message::BackendEvent(event) => match event {
-                WaylandUpdate::Toplevel(toplevel_update) => {
-                    self.handle_toplevel_update(toplevel_update);
-                }
-                WaylandUpdate::Image(handle, wayland_image) => {
-                    info!("Storing screenshot for toplevel: {:?}", handle);
-                    self.toplevel_captures.insert(handle, wayland_image);
-                }
-                WaylandUpdate::Init => {}
-                WaylandUpdate::Finished => {}
-            },
-            Message::DebouncedSearch(search_term) => {
-                // Only perform search if this is the most recent debounce timer
-                if let Some(timer) = self.search_debounce_timer {
-                    // Reduced threshold from 250ms to 40ms for more responsiveness
-                    if timer.elapsed() >= Duration::from_millis(40) && search_term == self.input_value {
-                        self.request(launcher::Request::Search(search_term));
-                        self.search_debounce_timer = None;
-                    }
-                }
-            }
             Message::AltTab => {
-                // Handle subsequent Alt+Tab presses - only show UI if we're already visible or waiting to be shown
-                if self.surface_state == SurfaceState::Visible || self.surface_state == SurfaceState::WaitingToBeShown {
-                    if !self.launcher_items.is_empty() {
-                        let current = self.active.unwrap_or(0);
-                        let next = (current + 1) % self.launcher_items.len();
-                        self.active = Some(next);
-                        println!("DEBUG: AltTab UI - cycling from {} to {} (of {})", current, next, self.launcher_items.len());
-                        
-                        // Show the switcher UI for subsequent presses
-                        if self.surface_state == SurfaceState::WaitingToBeShown {
-                            return self.show();
-                        }
-                    } else {
-                        // No items yet, just set initial active state
-                        self.active = Some(0);
-                    }
+                // Cycle to next window in Alt+Tab mode
+                if !self.launcher_items.is_empty() {
+                    let current = self.active.unwrap_or(0);
+                    let next = (current + 1) % self.launcher_items.len();
+                    self.active = Some(next);
+                    println!("DEBUG: AltTab - cycling to {} (of {})", next, self.launcher_items.len());
                 } else {
-                    // UI is hidden - this Alt+Tab should be handled by dbus_activation for instant switching
-                    println!("DEBUG: Ignoring Alt+Tab message - surface is hidden, dbus_activation should handle this");
+                    self.active = Some(0);
                 }
             }
             Message::ShiftAltTab => {
-                // Handle subsequent Shift+Alt+Tab presses - only show UI if we're already visible or waiting to be shown
-                if self.surface_state == SurfaceState::Visible || self.surface_state == SurfaceState::WaitingToBeShown {
-                    if !self.launcher_items.is_empty() {
-                        let current = self.active.unwrap_or(0);
-                        let prev = if current == 0 {
-                            self.launcher_items.len() - 1
-                        } else {
-                            current - 1
-                        };
-                        self.active = Some(prev);
-                        println!("DEBUG: ShiftAltTab UI - cycling from {} to {} (of {})", current, prev, self.launcher_items.len());
-                        
-                        // Show the switcher UI for subsequent presses
-                        if self.surface_state == SurfaceState::WaitingToBeShown {
-                            return self.show();
-                        }
+                // Cycle to previous window in Alt+Tab mode
+                if !self.launcher_items.is_empty() {
+                    let current = self.active.unwrap_or(0);
+                    let prev = if current == 0 {
+                        self.launcher_items.len() - 1
                     } else {
-                        // No items yet, just set initial active state
-                        self.active = Some(0);
-                    }
+                        current - 1
+                    };
+                    self.active = Some(prev);
+                    println!("DEBUG: ShiftAltTab - cycling to {} (of {})", prev, self.launcher_items.len());
                 } else {
-                    // UI is hidden - this Shift+Alt+Tab should be handled by dbus_activation for instant switching
-                    println!("DEBUG: Ignoring Shift+Alt+Tab message - surface is hidden, dbus_activation should handle this");
+                    self.active = Some(0);
                 }
             }
             Message::AltRelease => {
@@ -793,13 +779,39 @@ impl cosmic::Application for CosmicLauncher {
                 }
             }
             Message::SuperRelease => {
-                // On Super release, just hide if in super launcher mode
+                // On Super release in super launcher mode, hide the launcher
                 if self.super_launcher_mode {
-                    println!("DEBUG: Super key released in launcher mode");
                     return self.hide();
                 }
             }
+            Message::Opened(size, _id) => {
+                self.height = size.height;
+                self.handle_overlap();
+            }
+            Message::BackendEvent(event) => match event {
+                WaylandUpdate::Toplevel(toplevel_update) => {
+                    self.handle_toplevel_update(toplevel_update);
+                }
+                WaylandUpdate::Image(handle, wayland_image) => {
+                    info!("Storing screenshot for toplevel: {:?}", handle);
+                    self.toplevel_captures.insert(handle.clone(), wayland_image);
+                    self.screenshot_cache_time.insert(handle, Instant::now());
+                }
+                WaylandUpdate::Init => {}
+                WaylandUpdate::Finished => {}
+            }
+            Message::DebouncedSearch(search_term) => {
+                // Only perform search if this is the most recent debounce timer
+                if let Some(timer) = self.search_debounce_timer {
+                    // Reduced threshold from 250ms to 40ms for more responsiveness
+                    if timer.elapsed() >= Duration::from_millis(40) && search_term == self.input_value {
+                        self.request(launcher::Request::Search(search_term));
+                        self.search_debounce_timer = None;
+                    }
+                }
+            }
         }
+        
         Task::none()
     }
 
@@ -814,88 +826,32 @@ impl cosmic::Application for CosmicLauncher {
                 }
                 // hack: allow to close the launcher from the panel button
                 if self.last_hide.elapsed().as_millis() > 100 {
-                    // Enable Super launcher mode (Alt+Tab list with search)
-                    self.super_launcher_mode = true;
                     self.request(launcher::Request::Search(String::new()));
-
-                    self.surface_state = SurfaceState::WaitingToBeShown;
-                    
-                    // Focus search input when launcher opens - use multiple attempts
-                    return Task::batch(vec![
-                        cosmic::widget::text_input::focus(INPUT_ID.clone()),
-                        Task::perform(
-                            async { tokio::time::sleep(tokio::time::Duration::from_millis(100)).await; },
-                            |_| cosmic::Action::App(Message::CompleteFocusedId(INPUT_ID.clone())),
-                        ),
-                    ]);
+                    self.set_mode(false, true); // Super launcher mode only
+                    return self.show();
                 }
             }
             Details::ActivateAction { action, .. } => {
-                debug!("ActivateAction {}", action);
+                println!("DEBUG: ActivateAction {}", action);
 
                 let Ok(cmd) = LauncherTasks::from_str(&action) else {
                     return Task::none();
                 };
 
-                if self.surface_state == SurfaceState::Hidden {
-                    self.surface_state = SurfaceState::WaitingToBeShown;
-                    // For Alt+Tab, we need to populate the launcher with windows
-                    // Send an empty search to get the window list
-                    self.request(launcher::Request::Search(String::new()));
-                }
-
-                match cmd {
-                    LauncherTasks::AltTab => {
-                        // Enable Alt+Tab mode
-                        self.alt_tab_mode = true;
-                        
-                        // If we have items, immediately switch to next window without showing UI
-                        if !self.launcher_items.is_empty() {
-                            let current = self.active.unwrap_or(0);
-                            let next = (current + 1) % self.launcher_items.len();
-                            self.active = Some(next);
-                            println!("DEBUG: AltTab - immediately switching to window {} (of {})", next, self.launcher_items.len());
-                            
-                            // Immediately activate the next window without showing UI
-                            if let Some(item) = self.launcher_items.get(next) {
-                                self.request(launcher::Request::Activate(item.id));
-                                // Reset state and return without showing UI
-                                self.surface_state = SurfaceState::Hidden;
-                                return Task::none(); // Don't show UI for instant switch
-                            }
-                        } else {
-                            // If no items, set up for when they arrive
-                            self.active = Some(0);
-                        }
-                    }
-                    LauncherTasks::ShiftAltTab => {
-                        // Enable Alt+Tab mode  
-                        self.alt_tab_mode = true;
-                        
-                        // If we have items, immediately switch to previous window without showing UI
-                        if !self.launcher_items.is_empty() {
-                            let current = self.active.unwrap_or(0);
-                            let prev = if current == 0 {
-                                self.launcher_items.len() - 1
-                            } else {
-                                current - 1
-                            };
-                            self.active = Some(prev);
-                            println!("DEBUG: ShiftAltTab - immediately switching to window {} (of {})", prev, self.launcher_items.len());
-                            
-                            // Immediately activate the previous window without showing UI
-                            if let Some(item) = self.launcher_items.get(prev) {
-                                self.request(launcher::Request::Activate(item.id));
-                                // Reset state and return without showing UI
-                                self.surface_state = SurfaceState::Hidden;
-                                return Task::none(); // Don't show UI for instant switch
-                            }
-                        } else {
-                            // If no items, set up for when they arrive
-                            self.active = Some(0);
-                        }
-                    }
-                }
+                self.set_mode(true, false); // Alt+Tab mode only
+                
+                // Use cached toplevels immediately for instant display
+                self.populate_from_cached_toplevels();
+                
+                // For Alt+Tab, we don't need search request - we have cached data
+                // Fresh screenshots will come from wayland subscription
+                
+                let show_task = self.show();
+                let update_task = match cmd {
+                    LauncherTasks::AltTab => self.update(Message::AltTab),
+                    LauncherTasks::ShiftAltTab => self.update(Message::ShiftAltTab),
+                };
+                return Task::batch(vec![show_task, update_task]);
             }
             Details::Open { .. } => {}
         }
@@ -909,6 +865,15 @@ impl cosmic::Application for CosmicLauncher {
     #[allow(clippy::too_many_lines)]
     fn view_window(&self, id: SurfaceId) -> Element<'_, Self::Message> {
         if id == self.window_id {
+            // Don't render if surface should be hidden
+            if self.surface_state == SurfaceState::Hidden {
+                println!("DEBUG: view_window called but surface is Hidden - returning empty");
+                return container(text(""))
+                    .width(Length::Fixed(1.0))
+                    .height(Length::Fixed(1.0))
+                    .into();
+            }
+            
             // Safety check to prevent overflow in surface sizing
             if !self.height.is_finite() || self.height > 10000.0 || self.height < 1.0 {
                 return container(text("Loading..."))
@@ -936,7 +901,7 @@ impl cosmic::Application for CosmicLauncher {
         Subscription::batch(vec![
             wayland_subscription().map(Message::BackendEvent),
             launcher::subscription(0).map(Message::LauncherEvent),
-            listen_raw(|e, status, id| match e {
+            listen_raw(|e, _status, id| match e {
                 cosmic::iced::Event::PlatformSpecific(PlatformSpecific::Wayland(
                     wayland::Event::Layer(e, ..),
                 )) => Some(Message::Layer(e)),
@@ -967,6 +932,14 @@ impl cosmic::Application for CosmicLauncher {
                     // Debug: Log ALL key presses to understand what's happening
                     println!("DEBUG: Key pressed: {:?}, modifiers: alt={}, shift={}, ctrl={}", key, modifiers.alt(), modifiers.shift(), modifiers.control());
                     
+                    // Killswitch: Ctrl+Alt+J to exit
+                    if let Key::Character(c) = &key {
+                        if c == "j" && modifiers.control() && modifiers.alt() {
+                            println!("DEBUG: Killswitch activated - exiting");
+                            std::process::exit(0);
+                        }
+                    }
+
                     // Handle Alt+Tab and Shift+Alt+Tab explicitly - but only when UI is visible
                     if let Key::Named(Named::Tab) = key {
                         println!("DEBUG: Raw Tab event: alt={}, shift={}", modifiers.alt(), modifiers.shift());
@@ -983,42 +956,22 @@ impl cosmic::Application for CosmicLauncher {
                         return Some(Message::KeyboardNav(keyboard_nav::Action::FocusNext));
                     }
                     // Handle number activation
-                    if let Key::Character(c) = key.clone() {
-                        let nums = (1..=9)
-                            .map(|n| (n.to_string(), ((n + 10) % 10) - 1))
-                            .chain((0..=0).map(|n| (n.to_string(), ((n + 10) % 10) - 1)))
-                            .collect::<Vec<_>>();
-                        if let Some(&(ref _s, idx)) = nums.iter().find(|&&(ref s, _)| s == &c) {
-                            return Some(Message::Activate(Some(idx)));
-                        }
-                    }
-                    // Function keys for activation
-                    if let Key::Named(func_key) = key.clone() {
-                        match func_key {
-                            Named::F1 | Named::F2 | Named::F3 | Named::F4 | Named::F5
-                            | Named::F6 | Named::F7 | Named::F8 | Named::F9 | Named::F10 => {
-                                // Map function keys F1-F10 to indices 0-9
-                                let idx = match func_key {
-                                    Named::F1 => 0,
-                                    Named::F2 => 1,
-                                    Named::F3 => 2,
-                                    Named::F4 => 3,
-                                    Named::F5 => 4,
-                                    Named::F6 => 5,
-                                    Named::F7 => 6,
-                                    Named::F8 => 7,
-                                    Named::F9 => 8,
-                                    Named::F10 => 9,
-                                    _ => unreachable!(),
-                                };
-                                return Some(Message::Activate(Some(idx)));
-                            }
+                    // if let Key::Character(c) = key.clone() {
+                    //     let nums = (1..=9)
+                    //         .map(|n| (n.to_string(), ((n + 10) % 10) - 1))
+                    //         .chain((0..=0).map(|n| (n.to_string(), ((n + 10) % 10) - 1)))
+                    //         .collect::<Vec<_>>();
+                    //     if let Some(&(ref _s, idx)) = nums.iter().find(|&&(ref s, _)| s == &c) {
+                    //         return Some(Message::Activate(Some(idx)));
+                    //     }
+                    // }
+                    // Essential key handling
+                    if let Key::Named(named_key) = key.clone() {
+                        match named_key {
                             Named::ArrowUp => return Some(Message::KeyboardNav(keyboard_nav::Action::FocusPrevious)),
                             Named::ArrowDown => return Some(Message::KeyboardNav(keyboard_nav::Action::FocusNext)),
                             Named::Escape => return Some(Message::Hide),
-                            Named::Backspace if matches!(status, Status::Ignored) && modifiers.is_empty() => {
-                                return Some(Message::Backspace);
-                            }
+                            Named::Enter => return Some(Message::Activate(None)),
                             _ => {}
                         }
                     }

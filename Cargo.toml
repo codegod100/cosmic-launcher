@@ -65,3 +65,5 @@ clap = { version = "4.5", features = ["derive"] }
 cosmic-protocols = { git = "https://github.com/pop-os/cosmic-protocols" }
 switcheroo-control = { git = "https://github.com/pop-os/dbus-settings-bindings" }
 
+[target.x86_64-unknown-linux-musl.dependencies]
+
